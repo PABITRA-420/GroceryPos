@@ -18,6 +18,8 @@ pub struct CartItemInput {
     pub unit_price: f64,
     pub mrp: f64,
     pub gst_rate: f64,
+    #[serde(default)]
+    pub hsn_code: Option<String>,
 }
 
 /// Input payload to finalize and complete a sale
@@ -49,6 +51,7 @@ pub struct SaleItemRecord {
     pub gst_rate: f64,
     pub tax_amount: f64,
     pub total_price: f64,
+    pub hsn_code: Option<String>,
 }
 
 /// Sale header record persisted in SQLite `sales`
@@ -275,6 +278,7 @@ pub fn complete_sale_db(
             total_price: f64,
             stock_before: Option<f64>,
             stock_after: Option<f64>,
+            hsn_code: Option<String>,
         }
 
         let mut calculated_items: Vec<CalculatedItem> = Vec::with_capacity(input.items.len());
@@ -369,6 +373,22 @@ pub fn complete_sale_db(
             subtotal += line_subtotal;
             total_tax += tax_amount;
 
+            let hsn_code = match &item.hsn_code {
+                Some(h) if !h.trim().is_empty() => Some(h.trim().to_string()),
+                _ => {
+                    if let Some(pid) = item.product_id {
+                        tx.query_row(
+                            "SELECT hsn_code FROM products WHERE id = ?1;",
+                            params![pid],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(None)
+                    } else {
+                        None
+                    }
+                }
+            };
+
             calculated_items.push(CalculatedItem {
                 product_id: item.product_id,
                 product_name: item_name.to_string(),
@@ -386,6 +406,7 @@ pub fn complete_sale_db(
                 total_price: line_total,
                 stock_before,
                 stock_after,
+                hsn_code,
             });
         }
 
@@ -443,8 +464,8 @@ pub fn complete_sale_db(
             tx.execute(
                 "INSERT INTO sale_items (
                     sale_id, product_id, product_name, barcode, unit,
-                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);",
+                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price, hsn_code
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);",
                 params![
                     sale_id,
                     c_item.product_id,
@@ -457,6 +478,7 @@ pub fn complete_sale_db(
                     c_item.gst_rate,
                     c_item.tax_amount,
                     c_item.total_price,
+                    c_item.hsn_code,
                 ],
             )
             .map_err(|e| format!("Failed to insert sale item: {}", e))?;
@@ -495,6 +517,7 @@ pub fn complete_sale_db(
                 gst_rate: c_item.gst_rate,
                 tax_amount: c_item.tax_amount,
                 total_price: c_item.total_price,
+                hsn_code: c_item.hsn_code,
             });
         }
 
@@ -579,7 +602,7 @@ pub fn get_sale_by_invoice_db(
     let mut stmt = conn
         .prepare(
             "SELECT id, sale_id, product_id, product_name, barcode, unit,
-                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price
+                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price, hsn_code
              FROM sale_items WHERE sale_id = ?1 ORDER BY id ASC;",
         )
         .map_err(|e| format!("Failed to prepare sale items query: {}", e))?;
@@ -599,6 +622,7 @@ pub fn get_sale_by_invoice_db(
                 gst_rate: row.get(9)?,
                 tax_amount: row.get(10)?,
                 total_price: row.get(11)?,
+                hsn_code: row.get(12).ok(),
             })
         })
         .map_err(|e| format!("Failed to query sale items: {}", e))?;
@@ -709,7 +733,7 @@ pub fn get_sale_by_id_db(conn: &Connection, id: i64) -> Result<SaleResult, Strin
     let mut stmt = conn
         .prepare(
             "SELECT id, sale_id, product_id, product_name, barcode, unit,
-                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price
+                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price, hsn_code
              FROM sale_items WHERE sale_id = ?1 ORDER BY id ASC;",
         )
         .map_err(|e| format!("Failed to prepare sale items query: {}", e))?;
@@ -729,6 +753,7 @@ pub fn get_sale_by_id_db(conn: &Connection, id: i64) -> Result<SaleResult, Strin
                 gst_rate: row.get(9)?,
                 tax_amount: row.get(10)?,
                 total_price: row.get(11)?,
+                hsn_code: row.get(12).ok(),
             })
         })
         .map_err(|e| format!("Failed to query sale items: {}", e))?;
@@ -940,6 +965,397 @@ pub fn get_sales_history_db(
     })
 }
 
+/// Filter criteria for business reports and analytics
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BusinessReportFilter {
+    pub date_preset: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+/// Aggregated business KPIs and profit summary
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BusinessReportSummary {
+    pub total_invoices: i64,
+    pub total_items_sold: f64,
+    pub total_sales_revenue: f64, // Spend on sell
+    pub total_purchase_cost: f64, // Spent on buy / cost of goods
+    pub gross_profit: f64,
+    pub profit_margin_percent: f64,
+    pub total_tax: f64,
+    pub total_discount: f64,
+    pub payment_cash: f64,
+    pub payment_upi: f64,
+    pub payment_card: f64,
+}
+
+/// Customer spend record for customer analytics and CSV export
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomerSpendItem {
+    pub customer_id: Option<i64>,
+    pub name: String,
+    pub phone: String,
+    pub address: String,
+    pub total_invoices: i64,
+    pub total_spent_on_buying: f64,
+    pub total_purchase_cost_to_store: f64,
+    pub last_visit: String,
+}
+
+/// Product sales velocity and profit record
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TopSellingProductItem {
+    pub product_id: Option<i64>,
+    pub product_name: String,
+    pub category: String,
+    pub barcode: Option<String>,
+    pub hsn_code: Option<String>,
+    pub unit: String,
+    pub quantity_sold: f64,
+    pub total_sales_revenue: f64,
+    pub total_purchase_cost: f64,
+    pub total_profit: f64,
+}
+
+/// Complete report payload bundle
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BusinessReportResult {
+    pub period_label: String,
+    pub summary: BusinessReportSummary,
+    pub customers: Vec<CustomerSpendItem>,
+    pub top_products: Vec<TopSellingProductItem>,
+    pub sales: Vec<SaleListItem>,
+}
+
+/// Retrieves comprehensive business performance, customer spend, top products,
+/// and sales records for any daily, monthly, yearly, or custom time period.
+pub fn get_business_report_db(
+    conn: &Connection,
+    filter: BusinessReportFilter,
+) -> Result<BusinessReportResult, String> {
+    let mut where_clauses: Vec<String> = Vec::new();
+    let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+    let preset = filter.date_preset.as_deref().map(str::trim).unwrap_or("today");
+
+    let period_label = match preset.to_lowercase().as_str() {
+        "today" => {
+            where_clauses.push("date(s.created_at) = date('now', 'localtime')".to_string());
+            "Today (Daily)".to_string()
+        }
+        "yesterday" => {
+            where_clauses.push("date(s.created_at) = date('now', 'localtime', '-1 day')".to_string());
+            "Yesterday".to_string()
+        }
+        "this_week" | "last_7_days" => {
+            where_clauses.push(
+                "date(s.created_at) >= date('now', 'localtime', '-6 days') AND date(s.created_at) <= date('now', 'localtime')"
+                    .to_string(),
+            );
+            "Last 7 Days (Weekly)".to_string()
+        }
+        "this_month" => {
+            where_clauses.push("strftime('%Y-%m', s.created_at) = strftime('%Y-%m', 'now', 'localtime')".to_string());
+            "This Month (Monthly)".to_string()
+        }
+        "last_month" => {
+            where_clauses.push("strftime('%Y-%m', s.created_at) = strftime('%Y-%m', 'now', 'localtime', 'start of month', '-1 day')".to_string());
+            "Last Month".to_string()
+        }
+        "this_year" => {
+            where_clauses.push("strftime('%Y', s.created_at) = strftime('%Y', 'now', 'localtime')".to_string());
+            "This Year (Yearly)".to_string()
+        }
+        "custom" => {
+            let has_start = filter.start_date.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let has_end = filter.end_date.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+            if let Some(s_date) = has_start {
+                if !is_valid_iso_date(s_date) {
+                    return Err(format!("Invalid start date '{}'. Format: YYYY-MM-DD", s_date));
+                }
+                where_clauses.push("date(s.created_at) >= date(?)".to_string());
+                params_vec.push(s_date.to_string().into());
+            }
+
+            if let Some(e_date) = has_end {
+                if !is_valid_iso_date(e_date) {
+                    return Err(format!("Invalid end date '{}'. Format: YYYY-MM-DD", e_date));
+                }
+                where_clauses.push("date(s.created_at) <= date(?)".to_string());
+                params_vec.push(e_date.to_string().into());
+            }
+
+            match (has_start, has_end) {
+                (Some(s), Some(e)) => format!("{} to {}", s, e),
+                (Some(s), None) => format!("From {}", s),
+                (None, Some(e)) => format!("Until {}", e),
+                (None, None) => "Custom Range".to_string(),
+            }
+        }
+        "all" | _ => {
+            "All Time".to_string()
+        }
+    };
+
+    let where_sql = if where_clauses.is_empty() {
+        "1=1".to_string()
+    } else {
+        where_clauses.join(" AND ")
+    };
+
+    let query_params: Vec<&dyn rusqlite::ToSql> = params_vec
+        .iter()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
+
+    // 1. Sales & Revenue Summary
+    let summary_sql = format!(
+        "SELECT
+            COUNT(s.id),
+            COALESCE(SUM(s.subtotal), 0.0),
+            COALESCE(SUM(s.discount_amount), 0.0),
+            COALESCE(SUM(s.tax_amount), 0.0),
+            COALESCE(SUM(s.total_amount), 0.0),
+            COALESCE(SUM(CASE WHEN UPPER(s.payment_mode) = 'CASH' THEN s.total_amount ELSE 0.0 END), 0.0),
+            COALESCE(SUM(CASE WHEN UPPER(s.payment_mode) = 'UPI' THEN s.total_amount ELSE 0.0 END), 0.0),
+            COALESCE(SUM(CASE WHEN UPPER(s.payment_mode) = 'CARD' THEN s.total_amount ELSE 0.0 END), 0.0)
+         FROM sales s
+         WHERE {};",
+        where_sql
+    );
+
+    let (
+        total_invoices,
+        _subtotal,
+        total_discount,
+        total_tax,
+        total_sales_revenue,
+        payment_cash,
+        payment_upi,
+        payment_card,
+    ): (i64, f64, f64, f64, f64, f64, f64, f64) = conn
+        .query_row(&summary_sql, query_params.as_slice(), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to compute sales summary: {}", e))?;
+
+    // 2. Total items sold & purchase cost of goods sold
+    let cogs_sql = format!(
+        "SELECT
+            COALESCE(SUM(si.quantity), 0.0),
+            COALESCE(SUM(si.quantity * COALESCE(p.purchase_price, 0.0)), 0.0)
+         FROM sale_items si
+         JOIN sales s ON si.sale_id = s.id
+         LEFT JOIN products p ON si.product_id = p.id
+         WHERE {};",
+        where_sql
+    );
+
+    let (total_items_sold, total_purchase_cost): (f64, f64) = conn
+        .query_row(&cogs_sql, query_params.as_slice(), |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .map_err(|e| format!("Failed to compute cost of goods sold: {}", e))?;
+
+    let gross_profit = round_currency(total_sales_revenue - total_purchase_cost);
+    let profit_margin_percent = if total_sales_revenue > 0.0 {
+        round_currency((gross_profit / total_sales_revenue) * 100.0)
+    } else {
+        0.0
+    };
+
+    let summary = BusinessReportSummary {
+        total_invoices,
+        total_items_sold: (total_items_sold * 1000.0).round() / 1000.0,
+        total_sales_revenue: round_currency(total_sales_revenue),
+        total_purchase_cost: round_currency(total_purchase_cost),
+        gross_profit,
+        profit_margin_percent,
+        total_tax: round_currency(total_tax),
+        total_discount: round_currency(total_discount),
+        payment_cash: round_currency(payment_cash),
+        payment_upi: round_currency(payment_upi),
+        payment_card: round_currency(payment_card),
+    };
+
+    // 3. Customer Spend Query
+    let customers_sql = format!(
+        "SELECT
+            s.customer_id,
+            COALESCE(s.customer_name, 'Walk-in Customer') AS cust_name,
+            COALESCE(s.customer_phone, '') AS cust_phone,
+            COALESCE(c.address, '') AS cust_address,
+            COUNT(s.id) AS inv_count,
+            COALESCE(SUM(s_sub.sale_total), 0.0) AS total_spent,
+            COALESCE(SUM(s_sub.sale_cost), 0.0) AS total_cost,
+            MAX(s.created_at) AS last_date
+         FROM sales s
+         LEFT JOIN customers c ON s.customer_id = c.id
+         JOIN (
+            SELECT
+                s2.id,
+                s2.total_amount AS sale_total,
+                COALESCE(SUM(si.quantity * COALESCE(p.purchase_price, 0.0)), 0.0) AS sale_cost
+            FROM sales s2
+            LEFT JOIN sale_items si ON si.sale_id = s2.id
+            LEFT JOIN products p ON si.product_id = p.id
+            GROUP BY s2.id
+         ) s_sub ON s.id = s_sub.id
+         WHERE {}
+         GROUP BY s.customer_id, s.customer_name, s.customer_phone
+         ORDER BY total_spent DESC;",
+        where_sql
+    );
+
+    let mut cust_stmt = conn
+        .prepare(&customers_sql)
+        .map_err(|e| format!("Failed to prepare customer spend query: {}", e))?;
+
+    let cust_rows = cust_stmt
+        .query_map(query_params.as_slice(), |r| {
+            let spent: f64 = r.get(5)?;
+            let cost: f64 = r.get(6)?;
+            Ok(CustomerSpendItem {
+                customer_id: r.get(0)?,
+                name: r.get(1)?,
+                phone: r.get(2)?,
+                address: r.get(3)?,
+                total_invoices: r.get(4)?,
+                total_spent_on_buying: round_currency(spent),
+                total_purchase_cost_to_store: round_currency(cost),
+                last_visit: r.get(7)?,
+            })
+        })
+        .map_err(|e| format!("Failed to execute customer spend query: {}", e))?;
+
+    let mut customers = Vec::new();
+    for row in cust_rows {
+        customers.push(row.map_err(|e| format!("Failed to read customer item: {}", e))?);
+    }
+
+    // 4. Top / More Selling Items Query
+    let products_sql = format!(
+        "SELECT
+            si.product_id,
+            si.product_name,
+            COALESCE(p.category, 'General') AS category,
+            si.barcode,
+            si.hsn_code,
+            si.unit,
+            COALESCE(SUM(si.quantity), 0.0) AS total_qty,
+            COALESCE(SUM(si.total_price), 0.0) AS total_revenue,
+            COALESCE(SUM(si.quantity * COALESCE(p.purchase_price, 0.0)), 0.0) AS total_cost
+         FROM sale_items si
+         JOIN sales s ON si.sale_id = s.id
+         LEFT JOIN products p ON si.product_id = p.id
+         WHERE {}
+         GROUP BY si.product_name, si.unit
+         ORDER BY total_qty DESC;",
+        where_sql
+    );
+
+    let mut prod_stmt = conn
+        .prepare(&products_sql)
+        .map_err(|e| format!("Failed to prepare top products query: {}", e))?;
+
+    let prod_rows = prod_stmt
+        .query_map(query_params.as_slice(), |r| {
+            let qty: f64 = r.get(6)?;
+            let rev: f64 = r.get(7)?;
+            let cost: f64 = r.get(8)?;
+            Ok(TopSellingProductItem {
+                product_id: r.get(0)?,
+                product_name: r.get(1)?,
+                category: r.get(2)?,
+                barcode: r.get(3)?,
+                hsn_code: r.get(4)?,
+                unit: r.get(5)?,
+                quantity_sold: (qty * 1000.0).round() / 1000.0,
+                total_sales_revenue: round_currency(rev),
+                total_purchase_cost: round_currency(cost),
+                total_profit: round_currency(rev - cost),
+            })
+        })
+        .map_err(|e| format!("Failed to execute top products query: {}", e))?;
+
+    let mut top_products = Vec::new();
+    for row in prod_rows {
+        top_products.push(row.map_err(|e| format!("Failed to read product report item: {}", e))?);
+    }
+
+    // 5. Itemized Sales Invoices List
+    let sales_sql = format!(
+        "SELECT
+            s.id,
+            s.invoice_number,
+            s.customer_id,
+            s.customer_name,
+            s.customer_phone,
+            s.subtotal,
+            s.discount_amount,
+            s.tax_amount,
+            s.total_amount,
+            s.payment_mode,
+            s.payment_status,
+            s.notes,
+            s.created_at,
+            (SELECT count(*) FROM sale_items WHERE sale_id = s.id) AS item_count,
+            (SELECT coalesce(sum(quantity), 0.0) FROM sale_items WHERE sale_id = s.id) AS total_quantity
+         FROM sales s
+         WHERE {}
+         ORDER BY s.id DESC;",
+        where_sql
+    );
+
+    let mut sales_stmt = conn
+        .prepare(&sales_sql)
+        .map_err(|e| format!("Failed to prepare report sales query: {}", e))?;
+
+    let sales_rows = sales_stmt
+        .query_map(query_params.as_slice(), |r| {
+            Ok(SaleListItem {
+                id: r.get(0)?,
+                invoice_number: r.get(1)?,
+                customer_id: r.get(2)?,
+                customer_name: r.get(3)?,
+                customer_phone: r.get(4)?,
+                subtotal: r.get(5)?,
+                discount_amount: r.get(6)?,
+                tax_amount: r.get(7)?,
+                total_amount: r.get(8)?,
+                payment_mode: r.get(9)?,
+                payment_status: r.get(10)?,
+                notes: r.get(11)?,
+                created_at: r.get(12)?,
+                item_count: r.get(13)?,
+                total_quantity: r.get(14)?,
+            })
+        })
+        .map_err(|e| format!("Failed to execute report sales query: {}", e))?;
+
+    let mut sales = Vec::new();
+    for row in sales_rows {
+        sales.push(row.map_err(|e| format!("Failed to read sale record: {}", e))?);
+    }
+
+    Ok(BusinessReportResult {
+        period_label,
+        summary,
+        customers,
+        top_products,
+        sales,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -953,6 +1369,8 @@ mod tests {
             .expect("Failed to run schema migration 002");
         conn.execute_batch(include_str!("../migrations/003_returns_and_stock_ledger.sql"))
             .expect("Failed to run schema migration 003");
+        conn.execute_batch(include_str!("../migrations/004_hsn_and_gstin.sql"))
+            .expect("Failed to run schema migration 004");
         conn
     }
 
@@ -981,6 +1399,7 @@ mod tests {
                 unit_price: 30.0,
                 mrp: 30.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1040,6 +1459,7 @@ mod tests {
                     unit_price: 50.0,
                     mrp: 50.0,
                     gst_rate: 0.0,
+                    hsn_code: Some("1006".to_string()),
                 },
                 CartItemInput {
                     product_id: Some(2),
@@ -1050,6 +1470,7 @@ mod tests {
                     unit_price: 100.0,
                     mrp: 120.0,
                     gst_rate: 18.0,
+                    hsn_code: Some("3305".to_string()),
                 },
             ],
             discount_amount: 10.0,
@@ -1101,6 +1522,7 @@ mod tests {
                 unit_price: 55.0,
                 mrp: 55.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1147,6 +1569,7 @@ mod tests {
                 unit_price: 100.0,
                 mrp: 100.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1182,6 +1605,7 @@ mod tests {
                 unit_price: 10.0,
                 mrp: 10.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 50.0, // Exceeds 10.0
             payment_mode: "CASH".to_string(),
@@ -1218,6 +1642,7 @@ mod tests {
                     unit_price: 10.0,
                     mrp: 10.0,
                     gst_rate: 0.0,
+                    hsn_code: None,
                 }],
                 discount_amount: 0.0,
                 payment_mode: "CASH".to_string(),
@@ -1261,6 +1686,7 @@ mod tests {
                 unit_price: 246.75,
                 mrp: 250.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1302,6 +1728,7 @@ mod tests {
                 unit_price: 45.0,
                 mrp: 45.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1340,6 +1767,7 @@ mod tests {
                     unit_price: 40.0,
                     mrp: 40.0,
                     gst_rate: 0.0,
+                    hsn_code: None,
                 }],
                 discount_amount: 0.0,
                 payment_mode: "CASH".to_string(),
@@ -1425,6 +1853,7 @@ mod tests {
                 unit_price: 100.0,
                 mrp: 100.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1446,6 +1875,7 @@ mod tests {
                 unit_price: 100.0,
                 mrp: 100.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "UPI".to_string(),
@@ -1467,6 +1897,7 @@ mod tests {
                 unit_price: 100.0,
                 mrp: 100.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CARD".to_string(),
@@ -1539,6 +1970,7 @@ mod tests {
                 unit_price: 30.0,
                 mrp: 30.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1561,6 +1993,7 @@ mod tests {
                     unit_price: 30.0,
                     mrp: 30.0,
                     gst_rate: 0.0,
+                    hsn_code: None,
                 }],
                 discount_amount: 0.0,
                 payment_mode: "UPI".to_string(),
@@ -1613,6 +2046,7 @@ mod tests {
                 unit_price: 40.0,
                 mrp: 40.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1686,6 +2120,7 @@ mod tests {
                 unit_price: 25.0,
                 mrp: 25.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1765,6 +2200,7 @@ mod tests {
                 unit_price: 20.0,
                 mrp: 20.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1804,6 +2240,7 @@ mod tests {
                 unit_price: 160.0, // Exceeds MRP 150.0!
                 mrp: 150.0,
                 gst_rate: 5.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1816,6 +2253,101 @@ mod tests {
             "Error must report MRP violation: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_business_report_generation() {
+        let mut conn = setup_test_db();
+
+        // 1. Create a customer
+        conn.execute(
+            "INSERT INTO customers (id, name, phone, address) VALUES (1, 'Ramesh Gupta', '9876543210', 'Shop 4, Market');",
+            [],
+        ).unwrap();
+
+        // 2. Create products with purchase_price, selling_price, mrp
+        conn.execute(
+            "INSERT INTO products (id, name, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, hsn_code)
+             VALUES (1, 'Basmati Rice 1kg', 'Grains & Flours', 'Kg', 70.0, 95.0, 100.0, 5.0, 50.0, '1006');",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO products (id, name, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, hsn_code)
+             VALUES (2, 'Toor Dal 500g', 'Pulses & Dals', 'Gram', 60.0, 80.0, 85.0, 0.0, 30.0, '0713');",
+            [],
+        ).unwrap();
+
+        // 3. Complete a sale
+        let sale_input = CreateSaleInput {
+            customer_id: Some(1),
+            customer_name: Some("Ramesh Gupta".to_string()),
+            customer_phone: Some("9876543210".to_string()),
+            items: vec![
+                CartItemInput {
+                    product_id: Some(1),
+                    product_name: "Basmati Rice 1kg".to_string(),
+                    barcode: None,
+                    unit: "Kg".to_string(),
+                    quantity: 2.0,
+                    unit_price: 95.0,
+                    mrp: 100.0,
+                    gst_rate: 5.0,
+                    hsn_code: Some("1006".to_string()),
+                },
+                CartItemInput {
+                    product_id: Some(2),
+                    product_name: "Toor Dal 500g".to_string(),
+                    barcode: None,
+                    unit: "Gram".to_string(),
+                    quantity: 1.0,
+                    unit_price: 80.0,
+                    mrp: 85.0,
+                    gst_rate: 0.0,
+                    hsn_code: Some("0713".to_string()),
+                },
+            ],
+            discount_amount: 10.0,
+            payment_mode: "UPI".to_string(),
+            notes: Some("Diwali Order".to_string()),
+            round_off: None,
+        };
+
+        let result = complete_sale_db(&mut conn, sale_input).expect("Sale must succeed");
+        assert_eq!(result.items.len(), 2);
+
+        // 4. Query report for today
+        let report = get_business_report_db(&conn, BusinessReportFilter {
+            date_preset: Some("today".to_string()),
+            start_date: None,
+            end_date: None,
+        }).expect("Report query must succeed");
+
+        assert_eq!(report.summary.total_invoices, 1);
+        assert_eq!(report.summary.total_items_sold, 3.0);
+        // Revenue: subtotal 270 - 10 discount + 9.5 tax = 269.5
+        assert_eq!(report.summary.total_sales_revenue, 269.5);
+        // Cost: 2 * 70 + 1 * 60 = 200.0
+        assert_eq!(report.summary.total_purchase_cost, 200.0);
+        // Profit: 269.5 - 200 = 69.5
+        assert_eq!(report.summary.gross_profit, 69.5);
+        assert_eq!(report.summary.payment_upi, 269.5);
+        assert_eq!(report.summary.payment_cash, 0.0);
+
+        // Check customer spend
+        assert_eq!(report.customers.len(), 1);
+        assert_eq!(report.customers[0].name, "Ramesh Gupta");
+        assert_eq!(report.customers[0].total_spent_on_buying, 269.5);
+        assert_eq!(report.customers[0].total_purchase_cost_to_store, 200.0);
+
+        // Check top products
+        assert_eq!(report.top_products.len(), 2);
+        assert_eq!(report.top_products[0].product_name, "Basmati Rice 1kg");
+        assert_eq!(report.top_products[0].quantity_sold, 2.0);
+
+        // Check sales invoices list
+        assert_eq!(report.sales.len(), 1);
+        assert_eq!(report.sales[0].payment_mode, "UPI");
     }
 }
 

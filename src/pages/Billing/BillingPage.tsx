@@ -16,10 +16,13 @@ import {
   Printer,
   History,
   X,
+  Scale,
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Modal } from '../../components/ui/Modal';
 import { InvoiceReceipt } from '../../components/billing/InvoiceReceipt';
+import { WeightSelectorModal } from '../../components/billing/WeightSelectorModal';
+import { UpiQrModal } from '../../components/billing/UpiQrModal';
 import { productService } from '../../services/productService';
 import { customerService } from '../../services/customerService';
 import {
@@ -55,10 +58,22 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
   const [isSearching, setIsSearching] = useState(false);
   const [popularProducts, setPopularProducts] = useState<Product[]>([]);
 
+  // Weight Selector Modal state
+  const [isWeightModalOpen, setIsWeightModalOpen] = useState(false);
+  const [weightModalIndex, setWeightModalIndex] = useState<number | null>(null);
+
+  // UPI QR Code Modal state
+  const [isUpiModalOpen, setIsUpiModalOpen] = useState(false);
+
   // ----------------------------------------------------
-  // State: Customer
+  // State: Customer (Phone number entry & auto-identification)
   // ----------------------------------------------------
+  const [customerPhoneInput, setCustomerPhoneInput] = useState('');
+  const [newCustomerName, setNewCustomerName] = useState('');
+  const [newCustomerAddress, setNewCustomerAddress] = useState('');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [isNewCustomerActive, setIsNewCustomerActive] = useState(false);
+  const [allCustomersList, setAllCustomersList] = useState<Customer[]>([]);
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [customerSearchQuery, setCustomerSearchQuery] = useState('');
   const [customerSearchResults, setCustomerSearchResults] = useState<Customer[]>([]);
@@ -66,6 +81,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
   const [newCustName, setNewCustName] = useState('');
   const [newCustPhone, setNewCustPhone] = useState('');
   const [newCustAddress, setNewCustAddress] = useState('');
+  const [newCustGstin, setNewCustGstin] = useState('');
 
   // ----------------------------------------------------
   // State: Billing Calculations & Payment
@@ -86,6 +102,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
     shop_phone: '',
     shop_email: null,
     shop_gstin: null,
+    shop_upi_id: null,
     invoice_footer: 'Thank you for shopping with us! Please visit again.',
   });
 
@@ -111,12 +128,14 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
 
   const loadInitialData = async () => {
     try {
-      const [profileData, prods] = await Promise.all([
+      const [profileData, prods, custs] = await Promise.all([
         billingService.getShopProfile(),
         productService.getProducts({ low_stock_only: false }),
+        customerService.getCustomers(),
       ]);
       setShopProfile(profileData);
       setPopularProducts(prods.slice(0, 12));
+      setAllCustomersList(custs);
     } catch (err) {
       console.error('Failed to load billing initial data:', err);
     }
@@ -279,6 +298,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
           product_name: product.name,
           barcode: product.barcode,
           unit: product.unit,
+          hsn_code: product.hsn_code,
           quantity: 1,
           unit_price: product.selling_price,
           mrp: product.mrp,
@@ -318,6 +338,45 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
     });
   };
 
+  // Smart stepper for fractional Indian grocery units (25g, 50g, 250g, 500g)
+  const handleQuantityStep = (index: number, direction: 'up' | 'down') => {
+    const item = cart[index];
+    if (!item) return;
+
+    const isWeightUnit = ['Kg', 'Gram', 'Litre', 'ML', 'Quintal (Qtl)'].includes(item.unit);
+    let delta = 1.0;
+
+    if (isWeightUnit) {
+      if (item.quantity < 0.25) {
+        delta = 0.025; // 25gm step
+      } else if (item.quantity < 1.0) {
+        delta = 0.050; // 50gm step
+      } else if (item.quantity < 2.0) {
+        delta = 0.250; // 250gm step
+      } else {
+        delta = 0.500; // 500gm step
+      }
+    }
+
+    const newQty =
+      direction === 'up'
+        ? Math.round((item.quantity + delta) * 1000) / 1000
+        : Math.round(Math.max(0, item.quantity - delta) * 1000) / 1000;
+
+    updateItemQuantity(index, newQty);
+  };
+
+  const handleOpenWeightModal = (index: number) => {
+    setWeightModalIndex(index);
+    setIsWeightModalOpen(true);
+  };
+
+  const handleApplyWeight = (newQty: number) => {
+    if (weightModalIndex !== null) {
+      updateItemQuantity(weightModalIndex, newQty);
+    }
+  };
+
   const removeItemFromCart = (index: number) => {
     setCart((prevCart) => prevCart.filter((_, i) => i !== index));
   };
@@ -330,9 +389,55 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
     }
   };
 
+  // ----------------------------------------------------
+  // Phone-driven Customer Recognition & Quick Add
+  // ----------------------------------------------------
+  const handlePhoneInputChange = (rawVal: string) => {
+    const cleaned = rawVal.replace(/[^\d]/g, '').slice(0, 10);
+    setCustomerPhoneInput(cleaned);
+
+    if (!cleaned) {
+      setSelectedCustomer(null);
+      setIsNewCustomerActive(false);
+      setNewCustomerName('');
+      setNewCustomerAddress('');
+      return;
+    }
+
+    // Check if phone matches any customer in database
+    const matched = allCustomersList.find((c) => {
+      if (!c.phone) return false;
+      const cCleaned = c.phone.replace(/[^\d]/g, '');
+      return cCleaned === cleaned;
+    });
+
+    if (matched) {
+      setSelectedCustomer(matched);
+      setIsNewCustomerActive(false);
+      setNewCustomerName('');
+      setNewCustomerAddress('');
+    } else {
+      setSelectedCustomer(null);
+      // If 10 digits entered, automatically open fields for Name & Address
+      if (cleaned.length >= 10) {
+        setIsNewCustomerActive(true);
+      } else {
+        setIsNewCustomerActive(false);
+      }
+    }
+  };
+
+  const handleClearCustomer = () => {
+    setCustomerPhoneInput('');
+    setNewCustomerName('');
+    setNewCustomerAddress('');
+    setSelectedCustomer(null);
+    setIsNewCustomerActive(false);
+  };
+
   const resetBill = () => {
     setCart([]);
-    setSelectedCustomer(null);
+    handleClearCustomer();
     setDiscountAmount(0);
     setPaymentMode('CASH');
     setCashReceived('');
@@ -423,6 +528,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
         name: newCustName.trim(),
         phone: newCustPhone.trim() || null,
         address: newCustAddress.trim() || null,
+        gstin: newCustGstin.trim().toUpperCase() || null,
       });
       setSelectedCustomer(created);
       setIsQuickAddCustomerOpen(false);
@@ -430,6 +536,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
       setNewCustName('');
       setNewCustPhone('');
       setNewCustAddress('');
+      setNewCustGstin('');
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : String(err));
     }
@@ -459,15 +566,54 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
     try {
       setIsSubmitting(true);
 
+      // Customer Identification & Registration Flow
+      let finalCustomerId: number | null = null;
+      let finalCustomerName = 'Walk-in Customer';
+      let finalCustomerPhone: string | null = null;
+
+      if (customerPhoneInput.trim()) {
+        if (selectedCustomer) {
+          finalCustomerId = selectedCustomer.id;
+          finalCustomerName = selectedCustomer.name;
+          finalCustomerPhone = selectedCustomer.phone || customerPhoneInput.trim();
+        } else {
+          // New customer must provide name (Mandatory)
+          if (!newCustomerName.trim()) {
+            setErrorMessage('Customer Name is mandatory when a phone number is entered.');
+            setIsSubmitting(false);
+            return;
+          }
+
+          try {
+            // Automatically insert new customer into SQLite database
+            const created = await customerService.createCustomer({
+              name: newCustomerName.trim(),
+              phone: customerPhoneInput.trim(),
+              address: newCustomerAddress.trim() || null,
+            });
+            finalCustomerId = created.id;
+            finalCustomerName = created.name;
+            finalCustomerPhone = created.phone || customerPhoneInput.trim();
+            setAllCustomersList((prev) => [created, ...prev]);
+            setSelectedCustomer(created);
+          } catch (custErr) {
+            console.error('Customer auto-create note:', custErr);
+            finalCustomerName = newCustomerName.trim();
+            finalCustomerPhone = customerPhoneInput.trim();
+          }
+        }
+      }
+
       const saleInput = {
-        customer_id: selectedCustomer ? selectedCustomer.id : null,
-        customer_name: selectedCustomer ? selectedCustomer.name : 'Walk-in Customer',
-        customer_phone: selectedCustomer?.phone || null,
+        customer_id: finalCustomerId,
+        customer_name: finalCustomerName,
+        customer_phone: finalCustomerPhone,
         items: cart.map((item) => ({
           product_id: item.product_id || null,
           product_name: item.product_name,
           barcode: item.barcode || null,
           unit: item.unit,
+          hsn_code: item.hsn_code || null,
           quantity: item.quantity,
           unit_price: item.unit_price,
           mrp: item.mrp,
@@ -687,7 +833,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
                               >
                                 {isOutOfStock
                                   ? 'Out of Stock'
-                                  : `${product.stock} ${product.unit}`}
+                                  : `${Math.round(product.stock)} ${product.unit}`}
                               </span>
                             </div>
                             <div className="flex items-center gap-2 text-xs text-slate-500 mt-1">
@@ -763,7 +909,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
                             </h4>
                           </div>
                           <span className="text-[10px] text-slate-500 mt-1 block">
-                            Stock: {product.stock} {product.unit}
+                            Stock: {Math.round(product.stock)} {product.unit}
                           </span>
                         </div>
 
@@ -788,41 +934,135 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
         {/* RIGHT PANE: Cart & Checkout Screen                   */}
         {/* ==================================================== */}
         <div className="w-5/12 flex flex-col bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-          {/* Customer Bar */}
-          <div className="p-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="p-1.5 bg-emerald-100 text-emerald-800 rounded-md">
-                <UserCheck className="w-4 h-4" />
+          {/* Customer Phone-Driven Lookup & Identification Section */}
+          <div className="p-3 bg-slate-50 border-b border-slate-200 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div
+                  className={`p-1.5 rounded-md ${
+                    selectedCustomer
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : isNewCustomerActive
+                      ? 'bg-amber-100 text-amber-800'
+                      : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  <UserCheck className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-500 block uppercase font-bold tracking-wider">
+                    Customer Details
+                  </span>
+                  <span className="text-xs font-bold text-slate-900">
+                    {selectedCustomer
+                      ? selectedCustomer.name
+                      : isNewCustomerActive
+                      ? 'New Customer (Registration Required)'
+                      : 'Walk-in Customer'}
+                  </span>
+                </div>
               </div>
-              <div>
-                <span className="text-[10px] text-slate-500 block uppercase font-bold tracking-wider">
-                  Customer
-                </span>
-                <span className="text-xs font-bold text-slate-900">
-                  {selectedCustomer ? selectedCustomer.name : 'Walk-in Customer'}
-                  {selectedCustomer?.phone ? ` (${selectedCustomer.phone})` : ''}
-                </span>
-              </div>
-            </div>
 
-            <div className="flex items-center gap-1.5">
-              {selectedCustomer && (
+              {(customerPhoneInput || selectedCustomer || isNewCustomerActive) && (
                 <button
-                  onClick={() => setSelectedCustomer(null)}
-                  className="text-xs text-slate-400 hover:text-slate-600 px-1.5 py-1 cursor-pointer"
-                  title="Switch to Walk-in"
+                  type="button"
+                  onClick={handleClearCustomer}
+                  className="text-[11px] text-slate-600 hover:text-slate-900 flex items-center gap-1 font-semibold cursor-pointer px-2 py-0.5 rounded bg-slate-200 hover:bg-slate-300 transition"
+                  title="Reset to Walk-in Customer"
                 >
                   <X className="w-3.5 h-3.5" />
+                  <span>Reset / Walk-in</span>
                 </button>
               )}
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => setIsCustomerModalOpen(true)}
-              >
-                {selectedCustomer ? 'Change' : '+ Select / Add'}
-              </Button>
             </div>
+
+            {/* Quick Phone Number Input (Entry point) */}
+            <div className="relative">
+              <input
+                type="tel"
+                value={customerPhoneInput}
+                onChange={(e) => handlePhoneInputChange(e.target.value)}
+                placeholder="Enter Customer Mobile / Phone No (e.g. 9876543210)"
+                maxLength={10}
+                className={`w-full px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all focus:outline-none ${
+                  selectedCustomer
+                    ? 'bg-emerald-50/70 border-emerald-400 text-emerald-950 pr-24'
+                    : isNewCustomerActive
+                    ? 'bg-amber-50/70 border-amber-400 text-amber-950 pr-24 focus:ring-1 focus:ring-amber-500'
+                    : 'bg-white border-slate-300 text-slate-900 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500'
+                }`}
+              />
+              {selectedCustomer && (
+                <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-bold bg-emerald-600 text-white px-2 py-0.5 rounded shadow-2xs">
+                  ✓ VERIFIED
+                </span>
+              )}
+              {isNewCustomerActive && !selectedCustomer && (
+                <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-bold bg-amber-600 text-white px-2 py-0.5 rounded shadow-2xs">
+                  + NEW CUSTOMER
+                </span>
+              )}
+            </div>
+
+            {/* If Customer Matched in Database: Auto-selected banner */}
+            {selectedCustomer && (
+              <div className="text-[11px] bg-emerald-50 border border-emerald-200 rounded-md p-2 flex items-center justify-between text-emerald-900">
+                <div className="truncate mr-2">
+                  <span className="font-bold">{selectedCustomer.name}</span>
+                  {selectedCustomer.address && (
+                    <span className="text-slate-600 ml-1.5 text-[10px]">
+                      · {selectedCustomer.address}
+                    </span>
+                  )}
+                  {selectedCustomer.gstin && (
+                    <span className="text-[10px] bg-emerald-200 text-emerald-900 px-1 py-0.5 rounded font-mono ml-1.5">
+                      GSTIN: {selectedCustomer.gstin}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[10px] font-bold text-emerald-700 shrink-0">
+                  Auto-populated
+                </span>
+              </div>
+            )}
+
+            {/* If Phone Entered but NOT Matched in Database: Automatically reveal Name & Address fields */}
+            {isNewCustomerActive && !selectedCustomer && (
+              <div className="bg-amber-50/90 border border-amber-300 rounded-lg p-2.5 space-y-2">
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="font-bold uppercase tracking-wider text-amber-900">
+                    New Customer (Phone not found in DB)
+                  </span>
+                  <span className="font-semibold text-amber-800 bg-amber-200/80 px-1.5 py-0.5 rounded">
+                    Auto-saves on billing
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <input
+                      type="text"
+                      value={newCustomerName}
+                      onChange={(e) => setNewCustomerName(e.target.value)}
+                      placeholder="Customer Name *"
+                      required
+                      className="w-full px-2.5 py-1 text-xs border border-amber-300 rounded focus:outline-none focus:ring-1 focus:ring-amber-500 bg-white font-semibold text-slate-900 placeholder:text-amber-900/60"
+                    />
+                  </div>
+                  <div>
+                    <input
+                      type="text"
+                      value={newCustomerAddress}
+                      onChange={(e) => setNewCustomerAddress(e.target.value)}
+                      placeholder="Customer Address (Area / Colony)"
+                      className="w-full px-2.5 py-1 text-xs border border-amber-300 rounded focus:outline-none focus:ring-1 focus:ring-amber-500 bg-white font-medium text-slate-900 placeholder:text-slate-400"
+                    />
+                  </div>
+                </div>
+                <p className="text-[10px] text-amber-800 font-medium">
+                  * Name & Phone No are mandatory.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Cart Items Table */}
@@ -855,9 +1095,24 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
                         <div className="font-bold text-slate-900 leading-tight">
                           {item.product_name}
                         </div>
-                        <div className="text-[10px] text-slate-400 mt-0.5">
-                          ₹{item.unit_price.toFixed(2)} / {item.unit}
-                          {item.gst_rate > 0 && ` · GST ${item.gst_rate}%`}
+                        <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
+                          <span>₹{item.unit_price.toFixed(2)} / {item.unit}</span>
+                          {item.gst_rate > 0 && <span>· GST {item.gst_rate}%</span>}
+                          {item.hsn_code && <span>· HSN {item.hsn_code}</span>}
+                          {['Kg', 'Gram', 'Litre', 'ML', 'Quintal (Qtl)'].includes(item.unit) && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenWeightModal(index)}
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-[10px] font-bold transition cursor-pointer"
+                              title="Select weight preset (25g to 10kg) or ₹ to weight"
+                            >
+                              <Scale className="w-3 h-3 text-emerald-600" />
+                              {item.quantity < 1
+                                ? `${Math.round(item.quantity * 1000)} gm`
+                                : `${item.quantity} ${item.unit}`}
+                              <span className="font-normal text-emerald-600">(Change Wt / ₹)</span>
+                            </button>
+                          )}
                         </div>
                       </td>
 
@@ -865,8 +1120,10 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
                       <td className="py-2.5 px-2">
                         <div className="flex items-center justify-center border border-slate-200 rounded-md bg-white">
                           <button
-                            onClick={() => updateItemQuantity(index, item.quantity - 1)}
+                            type="button"
+                            onClick={() => handleQuantityStep(index, 'down')}
                             className="p-1 hover:bg-slate-100 text-slate-600 transition-colors cursor-pointer"
+                            title="Decrease quantity"
                           >
                             <Minus className="w-3 h-3" />
                           </button>
@@ -885,8 +1142,10 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
                             className="w-14 text-center text-xs font-bold text-slate-900 focus:outline-none px-1"
                           />
                           <button
-                            onClick={() => updateItemQuantity(index, item.quantity + 1)}
+                            type="button"
+                            onClick={() => handleQuantityStep(index, 'up')}
                             className="p-1 hover:bg-slate-100 text-slate-600 transition-colors cursor-pointer"
+                            title="Increase quantity"
                           >
                             <Plus className="w-3 h-3" />
                           </button>
@@ -1071,6 +1330,29 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
                 </div>
               )}
 
+              {/* UPI Instant QR Banner */}
+              {paymentMode === 'UPI' && (
+                <div className="bg-purple-50 p-2.5 rounded-lg border border-purple-200 space-y-1.5 text-xs mb-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-purple-900 flex items-center gap-1.5">
+                      <QrCode className="w-3.5 h-3.5 text-purple-600" />
+                      Dynamic UPI QR
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsUpiModalOpen(true)}
+                      className="px-2.5 py-1 text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 active:scale-95 rounded-md shadow-xs flex items-center gap-1 transition cursor-pointer"
+                    >
+                      <QrCode className="w-3 h-3" />
+                      Show QR Code
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-purple-700">
+                    Customer can scan QR to pay {formatCurrency(calculations.grandTotal)} instantly via GPay / PhonePe / Paytm / BHIM.
+                  </p>
+                </div>
+              )}
+
               {/* UPI / Card Reference Notes */}
               {paymentMode !== 'CASH' && (
                 <input
@@ -1209,6 +1491,19 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
           </div>
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Customer GSTIN (Optional, for B2B)
+            </label>
+            <input
+              type="text"
+              maxLength={15}
+              value={newCustGstin}
+              onChange={(e) => setNewCustGstin(e.target.value.toUpperCase())}
+              placeholder="e.g. 19ABCDE1234F1Z5"
+              className="w-full text-sm px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono uppercase"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
               Address (Optional)
             </label>
             <input
@@ -1318,6 +1613,34 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
           )}
         </div>
       </Modal>
+
+      {/* ==================================================== */}
+      {/* MODAL: Indian Kirana Weight Preset & Reverse Calc    */}
+      {/* ==================================================== */}
+      {weightModalIndex !== null && cart[weightModalIndex] && (
+        <WeightSelectorModal
+          isOpen={isWeightModalOpen}
+          onClose={() => {
+            setIsWeightModalOpen(false);
+            setWeightModalIndex(null);
+          }}
+          item={cart[weightModalIndex]}
+          onApply={handleApplyWeight}
+        />
+      )}
+
+      {/* ==================================================== */}
+      {/* MODAL: Dynamic NPCI UPI QR Code Modal                */}
+      {/* ==================================================== */}
+      <UpiQrModal
+        isOpen={isUpiModalOpen}
+        onClose={() => setIsUpiModalOpen(false)}
+        upiId={shopProfile.shop_upi_id}
+        shopName={shopProfile.shop_name}
+        amount={calculations.grandTotal}
+        invoiceNumber="COUNTER"
+        onPaymentConfirmed={handleCompleteSale}
+      />
     </div>
   );
 };

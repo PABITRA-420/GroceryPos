@@ -39,6 +39,7 @@ export const customerService = {
       name: input.name.trim(),
       phone: cleanPhone,
       address: input.address?.trim() || null,
+      gstin: input.gstin?.trim().toUpperCase() || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -60,7 +61,8 @@ export const customerService = {
       results = results.filter(
         (c) =>
           c.name.toLowerCase().includes(q) ||
-          (c.phone && c.phone.toLowerCase().includes(q))
+          (c.phone && c.phone.toLowerCase().includes(q)) ||
+          (c.gstin && c.gstin.toLowerCase().includes(q))
       );
     }
     return results;
@@ -104,6 +106,7 @@ export const customerService = {
       name: input.name.trim(),
       phone: cleanPhone,
       address: input.address?.trim() || null,
+      gstin: input.gstin?.trim().toUpperCase() || null,
       updated_at: new Date().toISOString(),
     };
     previewCustomers[index] = updated;

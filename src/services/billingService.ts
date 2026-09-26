@@ -8,6 +8,8 @@ import type {
   SalesFilterParams,
   PaginatedSalesResult,
   SaleListItem,
+  BusinessReportFilter,
+  BusinessReportResult,
 } from '../types';
 
 /**
@@ -345,5 +347,169 @@ export const billingService = {
     }
     previewProfile = { ...profile };
     return { ...previewProfile };
+  },
+
+  /**
+   * Generates comprehensive business performance reports, customer spend analytics,
+   * product velocity, and sales records for daily, monthly, yearly, or custom date ranges.
+   */
+  async getBusinessReport(filter: BusinessReportFilter = {}): Promise<BusinessReportResult> {
+    if (isTauriEnvironment()) {
+      return await invoke<BusinessReportResult>('get_business_report', { filter });
+    }
+
+    // In-memory simulation for browser preview mode
+    const preset = filter.date_preset || 'today';
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+
+    let filtered = [...previewSales];
+    if (preset === 'today') {
+      filtered = filtered.filter((s) => s.sale.created_at.slice(0, 10) === todayStr);
+    } else if (filter.start_date || filter.end_date) {
+      if (filter.start_date) {
+        filtered = filtered.filter((s) => s.sale.created_at.slice(0, 10) >= filter.start_date!);
+      }
+      if (filter.end_date) {
+        filtered = filtered.filter((s) => s.sale.created_at.slice(0, 10) <= filter.end_date!);
+      }
+    }
+
+    const total_invoices = filtered.length;
+    let total_items_sold = 0;
+    let total_sales_revenue = 0;
+    let total_purchase_cost = 0;
+    let total_tax = 0;
+    let total_discount = 0;
+    let payment_cash = 0;
+    let payment_upi = 0;
+    let payment_card = 0;
+
+    const customerMap = new Map<string, {
+      customer_id?: number | null;
+      name: string;
+      phone: string;
+      address: string;
+      total_invoices: number;
+      total_spent_on_buying: number;
+      total_purchase_cost_to_store: number;
+      last_visit: string;
+    }>();
+
+    const productMap = new Map<string, {
+      product_id?: number | null;
+      product_name: string;
+      category: string;
+      barcode?: string | null;
+      hsn_code?: string | null;
+      unit: string;
+      quantity_sold: number;
+      total_sales_revenue: number;
+      total_purchase_cost: number;
+      total_profit: number;
+    }>();
+
+    for (const item of filtered) {
+      total_sales_revenue += item.sale.total_amount;
+      total_tax += item.sale.tax_amount;
+      total_discount += item.sale.discount_amount;
+
+      if (item.sale.payment_mode === 'CASH') payment_cash += item.sale.total_amount;
+      else if (item.sale.payment_mode === 'UPI') payment_upi += item.sale.total_amount;
+      else if (item.sale.payment_mode === 'CARD') payment_card += item.sale.total_amount;
+
+      // Customer mapping
+      const custKey = item.sale.customer_phone || item.sale.customer_name || 'Walk-in';
+      const existingCust = customerMap.get(custKey) || {
+        customer_id: item.sale.customer_id,
+        name: item.sale.customer_name || 'Walk-in Customer',
+        phone: item.sale.customer_phone || '',
+        address: '',
+        total_invoices: 0,
+        total_spent_on_buying: 0,
+        total_purchase_cost_to_store: 0,
+        last_visit: item.sale.created_at,
+      };
+      existingCust.total_invoices += 1;
+      existingCust.total_spent_on_buying += item.sale.total_amount;
+      customerMap.set(custKey, existingCust);
+
+      // Line items
+      for (const line of item.items) {
+        total_items_sold += line.quantity;
+        const lineCost = line.quantity * (line.unit_price * 0.7); // Approximate 30% margin fallback
+        total_purchase_cost += lineCost;
+
+        const prodKey = `${line.product_name}_${line.unit}`;
+        const existingProd = productMap.get(prodKey) || {
+          product_id: line.product_id,
+          product_name: line.product_name,
+          category: 'General',
+          barcode: line.barcode,
+          hsn_code: line.hsn_code,
+          unit: line.unit,
+          quantity_sold: 0,
+          total_sales_revenue: 0,
+          total_purchase_cost: 0,
+          total_profit: 0,
+        };
+        existingProd.quantity_sold += line.quantity;
+        existingProd.total_sales_revenue += line.total_price;
+        existingProd.total_purchase_cost += lineCost;
+        existingProd.total_profit += (line.total_price - lineCost);
+        productMap.set(prodKey, existingProd);
+      }
+    }
+
+    const gross_profit = Math.round((total_sales_revenue - total_purchase_cost) * 100) / 100;
+    const profit_margin_percent = total_sales_revenue > 0
+      ? Math.round((gross_profit / total_sales_revenue) * 10000) / 100
+      : 0;
+
+    const customers = Array.from(customerMap.values()).sort(
+      (a, b) => b.total_spent_on_buying - a.total_spent_on_buying
+    );
+
+    const top_products = Array.from(productMap.values()).sort(
+      (a, b) => b.quantity_sold - a.quantity_sold
+    );
+
+    const salesList: SaleListItem[] = filtered.map((item) => ({
+      id: item.sale.id,
+      invoice_number: item.sale.invoice_number,
+      customer_id: item.sale.customer_id,
+      customer_name: item.sale.customer_name,
+      customer_phone: item.sale.customer_phone,
+      subtotal: item.sale.subtotal,
+      discount_amount: item.sale.discount_amount,
+      tax_amount: item.sale.tax_amount,
+      total_amount: item.sale.total_amount,
+      payment_mode: item.sale.payment_mode,
+      payment_status: item.sale.payment_status,
+      notes: item.sale.notes,
+      created_at: item.sale.created_at,
+      item_count: item.items.length,
+      total_quantity: item.items.reduce((sum, i) => sum + i.quantity, 0),
+    }));
+
+    return {
+      period_label: preset,
+      summary: {
+        total_invoices,
+        total_items_sold: Math.round(total_items_sold * 1000) / 1000,
+        total_sales_revenue: Math.round(total_sales_revenue * 100) / 100,
+        total_purchase_cost: Math.round(total_purchase_cost * 100) / 100,
+        gross_profit,
+        profit_margin_percent,
+        total_tax: Math.round(total_tax * 100) / 100,
+        total_discount: Math.round(total_discount * 100) / 100,
+        payment_cash: Math.round(payment_cash * 100) / 100,
+        payment_upi: Math.round(payment_upi * 100) / 100,
+        payment_card: Math.round(payment_card * 100) / 100,
+      },
+      customers,
+      top_products,
+      sales: salesList,
+    };
   },
 };

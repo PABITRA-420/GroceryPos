@@ -52,6 +52,7 @@ export interface Customer {
   name: string;
   phone?: string | null;
   address?: string | null;
+  gstin?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -63,6 +64,7 @@ export interface CreateCustomerInput {
   name: string;
   phone?: string | null;
   address?: string | null;
+  gstin?: string | null;
 }
 
 /**
@@ -73,6 +75,7 @@ export interface UpdateCustomerInput {
   name: string;
   phone?: string | null;
   address?: string | null;
+  gstin?: string | null;
 }
 
 /**
@@ -91,6 +94,7 @@ export interface Product {
   barcode?: string | null;
   category: string;
   unit: string;
+  hsn_code?: string | null;
   purchase_price: number;
   selling_price: number;
   mrp: number;
@@ -109,6 +113,7 @@ export interface CreateProductInput {
   barcode?: string | null;
   category?: string | null;
   unit: string;
+  hsn_code?: string | null;
   purchase_price?: number | null;
   selling_price: number;
   mrp?: number | null;
@@ -126,6 +131,7 @@ export interface UpdateProductInput {
   barcode?: string | null;
   category?: string | null;
   unit: string;
+  hsn_code?: string | null;
   purchase_price?: number | null;
   selling_price: number;
   mrp?: number | null;
@@ -173,6 +179,7 @@ export interface SaleItem {
   product_name: string;
   barcode?: string | null;
   unit: string;
+  hsn_code?: string | null;
   quantity: number;
   unit_price: number;
   mrp: number;
@@ -189,6 +196,7 @@ export interface CartItem {
   product_name: string;
   barcode?: string | null;
   unit: string;
+  hsn_code?: string | null;
   quantity: number;
   unit_price: number;
   mrp: number;
@@ -208,6 +216,7 @@ export interface CreateSaleInput {
     product_name: string;
     barcode?: string | null;
     unit: string;
+    hsn_code?: string | null;
     quantity: number;
     unit_price: number;
     mrp: number;
@@ -284,6 +293,7 @@ export interface ShopProfile {
   shop_phone: string;
   shop_email?: string | null;
   shop_gstin?: string | null;
+  shop_upi_id?: string | null;
   invoice_footer: string;
 }
 
@@ -479,6 +489,73 @@ export interface StockConsistencyReport {
   ledger_derived_stock?: number | null;
   is_consistent: boolean;
   total_movements_recorded: number;
+}
+
+/**
+ * Filter criteria for store performance reports & CSV export
+ */
+export interface BusinessReportFilter {
+  date_preset?: 'today' | 'yesterday' | 'this_week' | 'last_7_days' | 'this_month' | 'last_month' | 'this_year' | 'custom' | 'all';
+  start_date?: string | null;
+  end_date?: string | null;
+}
+
+/**
+ * Aggregated store KPIs & financial summary
+ */
+export interface BusinessReportSummary {
+  total_invoices: number;
+  total_items_sold: number;
+  total_sales_revenue: number; // Total spend on sell
+  total_purchase_cost: number; // Total spent on buy
+  gross_profit: number;
+  profit_margin_percent: number;
+  total_tax: number;
+  total_discount: number;
+  payment_cash: number;
+  payment_upi: number;
+  payment_card: number;
+}
+
+/**
+ * Customer spend summary record
+ */
+export interface CustomerSpendItem {
+  customer_id?: number | null;
+  name: string;
+  phone: string;
+  address: string;
+  total_invoices: number;
+  total_spent_on_buying: number;
+  total_purchase_cost_to_store: number;
+  last_visit: string;
+}
+
+/**
+ * Product sales velocity & profit record
+ */
+export interface TopSellingProductItem {
+  product_id?: number | null;
+  product_name: string;
+  category: string;
+  barcode?: string | null;
+  hsn_code?: string | null;
+  unit: string;
+  quantity_sold: number;
+  total_sales_revenue: number;
+  total_purchase_cost: number;
+  total_profit: number;
+}
+
+/**
+ * Complete business report payload bundle
+ */
+export interface BusinessReportResult {
+  period_label: string;
+  summary: BusinessReportSummary;
+  customers: CustomerSpendItem[];
+  top_products: TopSellingProductItem[];
+  sales: SaleListItem[];
 }
 
 

@@ -34,6 +34,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     shop_phone: '',
     shop_email: '',
     shop_gstin: '',
+    shop_upi_id: '',
     invoice_footer: 'Thank you for shopping with us! Please visit again.',
   });
 
@@ -63,6 +64,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         shop_phone: data.shop_phone || '',
         shop_email: data.shop_email || '',
         shop_gstin: data.shop_gstin || '',
+        shop_upi_id: data.shop_upi_id || '',
         invoice_footer: data.invoice_footer || 'Thank you for shopping with us! Please visit again.',
       });
     } catch (err) {
@@ -89,6 +91,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         shop_phone: profile.shop_phone.trim(),
         shop_email: profile.shop_email?.trim() || null,
         shop_gstin: profile.shop_gstin?.trim() || null,
+        shop_upi_id: profile.shop_upi_id?.trim() || null,
         invoice_footer: profile.invoice_footer.trim() || 'Thank you for shopping with us! Please visit again.',
       });
 
@@ -99,6 +102,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         shop_phone: saved.shop_phone,
         shop_email: saved.shop_email || '',
         shop_gstin: saved.shop_gstin || '',
+        shop_upi_id: saved.shop_upi_id || '',
         invoice_footer: saved.invoice_footer,
       });
 
@@ -251,7 +255,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               />
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Phone / Mobile Number
@@ -262,6 +266,19 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   onChange={(e) => setProfile({ ...profile, shop_phone: e.target.value })}
                   placeholder="e.g. 9876543210"
                   className="w-full text-sm px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Shop UPI ID (QR Payments)
+                </label>
+                <input
+                  type="text"
+                  value={profile.shop_upi_id || ''}
+                  onChange={(e) => setProfile({ ...profile, shop_upi_id: e.target.value })}
+                  placeholder="e.g. 9876543210@paytm"
+                  className="w-full text-sm px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono text-xs"
                 />
               </div>
 
@@ -325,6 +342,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 {profile.shop_phone && <span>Ph: {profile.shop_phone} </span>}
                 {profile.shop_gstin && <span>| GSTIN: {profile.shop_gstin}</span>}
               </div>
+              {profile.shop_upi_id && (
+                <div className="text-[11px] text-purple-600 font-semibold mt-0.5">
+                  UPI: {profile.shop_upi_id}
+                </div>
+              )}
               <div className="border-b border-dashed border-slate-300 my-2" />
               <div className="text-[10px] text-slate-500">
                 Invoice: INV-000001 · Date: {new Date().toLocaleDateString('en-IN')}

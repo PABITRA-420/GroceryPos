@@ -48,37 +48,78 @@
 
 /* Print Stylesheet for POS Invoices & Thermal Receipts */
 @media print {
-  html, body, #root {
+  html, body {
+    height: auto !important;
+    min-height: 100% !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Hide navigation, header, action buttons, and non-printable elements */
+  header, nav, aside, button, .print\:hidden {
+    display: none !important;
+  }
+
+  /* Keep container in normal flow so long receipts (10-20+ items, >1m) stream continuously */
+  #root,
+  main,
+  .print-receipt-wrapper {
+    display: block !important;
     height: auto !important;
     overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
     background: white !important;
   }
 
-  body * {
-    visibility: hidden;
-  }
-
-  #invoice-printable-area,
-  #invoice-printable-area * {
-    visibility: visible;
-  }
-
   #invoice-printable-area {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100% !important;
-    max-width: 100% !important;
-    margin: 0 !important;
-    padding: 8px !important;
+    position: static !important;
+    float: none !important;
+    display: block !important;
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    margin: 0 auto !important;
+    padding: 2mm !important;
     border: none !important;
     box-shadow: none !important;
     background: white !important;
     color: black !important;
   }
 
+  /* Prevent page breaks inside table rows, header blocks, total blocks, and QR code */
+  tr,
+  .receipt-block,
+  .receipt-table,
+  .receipt-totals,
+  .receipt-qr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  /* Continuous 80mm POS Thermal Roll styling */
+  .receipt-thermal {
+    width: 76mm !important;
+    max-width: 80mm !important;
+    margin: 0 auto !important;
+    padding: 2mm 1mm !important;
+    font-size: 11px !important;
+    line-height: 1.25 !important;
+  }
+
+  /* Standard A4 Paper format styling */
+  .receipt-standard {
+    width: 100% !important;
+    max-width: 210mm !important;
+    margin: 0 auto !important;
+    padding: 8mm !important;
+  }
+
   @page {
-    margin: 4mm;
+    size: auto;
+    margin: 0mm;
   }
 }
 

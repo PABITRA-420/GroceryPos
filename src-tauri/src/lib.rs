@@ -6,7 +6,10 @@ mod products;
 pub mod returns;
 mod settings;
 
-use billing::{CreateSaleInput, PaginatedSalesResult, SaleRecord, SaleResult, SalesFilterParams};
+use billing::{
+    BusinessReportFilter, BusinessReportResult, CreateSaleInput, PaginatedSalesResult, SaleRecord,
+    SaleResult, SalesFilterParams,
+};
 use customers::{CreateCustomerInput, Customer, CustomerSearchParams, UpdateCustomerInput};
 use db::DbState;
 use inventory::{
@@ -207,6 +210,16 @@ fn get_sale_by_id(
     state.with_conn(|conn| billing::get_sale_by_id_db(conn, id))
 }
 
+/// Native command to compute comprehensive store sales reports, customer analytics,
+/// and product velocity for any daily, monthly, yearly, or custom time period.
+#[tauri::command]
+fn get_business_report(
+    state: State<'_, DbState>,
+    filter: Option<BusinessReportFilter>,
+) -> Result<BusinessReportResult, String> {
+    state.with_conn(|conn| billing::get_business_report_db(conn, filter.unwrap_or_default()))
+}
+
 // ==========================================
 // Settings & Shop Profile Commands
 // ==========================================
@@ -395,6 +408,7 @@ pub fn run() {
             get_sale_by_id,
             get_recent_sales,
             get_sales_history,
+            get_business_report,
             get_shop_profile,
             save_shop_profile,
             get_returnable_items,
