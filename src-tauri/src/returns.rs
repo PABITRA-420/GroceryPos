@@ -746,6 +746,7 @@ mod tests {
         conn.execute_batch(include_str!("../migrations/002_sales_indexes.sql")).unwrap();
         conn.execute_batch(include_str!("../migrations/003_returns_and_stock_ledger.sql")).unwrap();
         conn.execute_batch(include_str!("../migrations/004_hsn_and_gstin.sql")).unwrap();
+        conn.execute_batch(include_str!("../migrations/005_expiry_and_batch.sql")).unwrap();
         conn
     }
 
@@ -775,11 +776,13 @@ mod tests {
                 mrp: 25.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         let sale_item_id = sale_res.items[0].id;
@@ -853,11 +856,13 @@ mod tests {
                 mrp: 100.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         let sale_item_id = sale_res.items[0].id;
@@ -903,11 +908,13 @@ mod tests {
                 mrp: 20.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         let sale_item_id = sale_res.items[0].id;
@@ -968,11 +975,13 @@ mod tests {
                 mrp: 30.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         // Return 1 packet marked restock = FALSE (expired/damaged)
@@ -1021,11 +1030,13 @@ mod tests {
                 mrp: 500.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 100.0,
             payment_mode: "UPI".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         assert_eq!(sale_res.sale.total_amount, 900.0);

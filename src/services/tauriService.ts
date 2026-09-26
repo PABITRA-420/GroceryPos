@@ -43,4 +43,32 @@ export const tauriService = {
       status: 'Ready for Native Desktop (Launch via Tauri for full native offline capabilities)',
     };
   },
+
+  /**
+   * Prompts the user with native Windows Open File Dialog
+   */
+  async openFileDialog(filterName = 'SQLite Database', extension = 'db'): Promise<string | null> {
+    if (isTauriEnvironment()) {
+      try {
+        return await invoke<string | null>('open_file_dialog', { filterName, extension });
+      } catch (err) {
+        console.error('Failed to open native file dialog:', err);
+      }
+    }
+    return null;
+  },
+
+  /**
+   * Prompts the user with native Windows Save File Dialog
+   */
+  async saveFileDialog(defaultName = 'grocerypos_backup.db', extension = 'db'): Promise<string | null> {
+    if (isTauriEnvironment()) {
+      try {
+        return await invoke<string | null>('save_file_dialog', { defaultName, extension });
+      } catch (err) {
+        console.error('Failed to open native save dialog:', err);
+      }
+    }
+    return null;
+  },
 };

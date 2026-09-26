@@ -19,8 +19,10 @@ import {
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Modal } from '../../components/ui/Modal';
+import { Gstr1ReportView } from '../../components/reports/Gstr1ReportView';
+import { DayEndReconciliationView } from '../../components/reports/DayEndReconciliationView';
 import { billingService, formatCurrency, formatSaleDateTime } from '../../services/billingService';
-import type { BusinessReportResult, BusinessReportFilter } from '../../types';
+import type { BusinessReportResult, BusinessReportFilter, Gstr1ReportResult, ShopProfile } from '../../types';
 
 function escapeCsvCell(val: unknown): string {
   if (val === null || val === undefined) return '';
@@ -66,8 +68,19 @@ export const ReportsPage: React.FC = () => {
   // Report state
   const [report, setReport] = useState<BusinessReportResult | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'customers' | 'products' | 'invoices'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'customers' | 'products' | 'invoices' | 'gstr1' | 'zreport'>('overview');
   const [searchFilter, setSearchFilter] = useState<string>('');
+  const [gstr1Data, setGstr1Data] = useState<Gstr1ReportResult | null>(null);
+  const [isGstr1Loading, setIsGstr1Loading] = useState(false);
+  const [shopProfile, setShopProfile] = useState<ShopProfile>({
+    shop_name: 'Apna Grocery Store',
+    owner_name: '',
+    shop_address: 'Main Market, Local City',
+    shop_phone: '',
+    shop_email: null,
+    shop_gstin: null,
+    invoice_footer: '',
+  });
 
   // Export Modal state
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -94,9 +107,33 @@ export const ReportsPage: React.FC = () => {
     }
   }, [datePreset, startDate, endDate]);
 
+  const loadGstr1Report = useCallback(async () => {
+    setIsGstr1Loading(true);
+    try {
+      const filter: BusinessReportFilter = {
+        date_preset: datePreset,
+        start_date: datePreset === 'custom' ? startDate : undefined,
+        end_date: datePreset === 'custom' ? endDate : undefined,
+      };
+      const res = await billingService.getGstr1Report(filter);
+      setGstr1Data(res);
+    } catch (err) {
+      console.error('Failed to load GSTR-1 report:', err);
+    } finally {
+      setIsGstr1Loading(false);
+    }
+  }, [datePreset, startDate, endDate]);
+
+  useEffect(() => {
+    billingService.getShopProfile().then(setShopProfile).catch(() => {});
+  }, []);
+
   useEffect(() => {
     fetchReport();
-  }, [fetchReport]);
+    if (activeTab === 'gstr1') {
+      loadGstr1Report();
+    }
+  }, [fetchReport, loadGstr1Report, activeTab]);
 
   // CSV Generator function
   const handleExportCsv = (options: {
@@ -538,6 +575,16 @@ export const ReportsPage: React.FC = () => {
                 label: `Sales Invoices (${report?.sales.length || 0})`,
                 icon: <FileText className="w-4 h-4" />,
               },
+              {
+                id: 'gstr1',
+                label: 'GSTR-1 GST Return',
+                icon: <FileSpreadsheet className="w-4 h-4 text-purple-600" />,
+              },
+              {
+                id: 'zreport',
+                label: 'Day-End Z-Report',
+                icon: <Banknote className="w-4 h-4 text-emerald-600" />,
+              },
             ].map((tab) => {
               const isActive = activeTab === tab.id;
               return (
@@ -912,6 +959,20 @@ export const ReportsPage: React.FC = () => {
                 </div>
               )}
             </div>
+          )}
+
+          {/* TAB 5: GSTR-1 GST COMPLIANT TAX RETURN */}
+          {activeTab === 'gstr1' && (
+            <Gstr1ReportView
+              data={gstr1Data}
+              isLoading={isGstr1Loading}
+              onRefresh={loadGstr1Report}
+            />
+          )}
+
+          {/* TAB 6: DAY-END CASH DRAWER RECONCILIATION (Z-REPORT) */}
+          {activeTab === 'zreport' && (
+            <DayEndReconciliationView shopProfile={shopProfile} />
           )}
         </div>
       </div>

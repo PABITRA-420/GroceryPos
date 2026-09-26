@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
-import { Printer, CheckCircle, FileText, Smartphone, History, ArrowLeft, RotateCcw } from 'lucide-react';
+import { Printer, CheckCircle, FileText, Smartphone, History, ArrowLeft, RotateCcw, Banknote, Share2 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import {
   formatCurrency,
@@ -8,6 +8,8 @@ import {
   formatQuantity,
 } from '../../services/billingService';
 import { numberToWordsIndian } from '../../utils/numberToWords';
+import { kickCashDrawer } from '../../utils/escPos';
+import { generateWhatsAppReceiptText, openWhatsAppShare } from '../../utils/whatsappBill';
 import type { SaleResult, ShopProfile } from '../../types';
 
 interface InvoiceReceiptProps {
@@ -33,7 +35,7 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
   backButtonLabel,
   onInitiateReturn,
 }) => {
-  const [printFormat, setPrintFormat] = useState<'thermal' | 'standard'>('thermal');
+  const [printFormat, setPrintFormat] = useState<'thermal-80' | 'thermal-58' | 'standard'>('thermal-80');
   const [upiQrDataUrl, setUpiQrDataUrl] = useState<string | null>(null);
   const { sale, items } = saleResult;
 
@@ -155,19 +157,30 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           {/* Format Switcher */}
           <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5 text-xs">
             <button
-              onClick={() => setPrintFormat('thermal')}
+              onClick={() => setPrintFormat('thermal-80')}
               className={`px-2.5 py-1.5 rounded-md flex items-center gap-1.5 font-medium transition-colors cursor-pointer ${
-                printFormat === 'thermal'
+                printFormat === 'thermal-80'
                   ? 'bg-slate-900 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               <Smartphone className="w-3.5 h-3.5" />
-              Thermal (80mm)
+              Thermal 80mm
+            </button>
+            <button
+              onClick={() => setPrintFormat('thermal-58')}
+              className={`px-2.5 py-1.5 rounded-md flex items-center gap-1.5 font-medium transition-colors cursor-pointer ${
+                printFormat === 'thermal-58'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              Thermal 58mm
             </button>
             <button
               onClick={() => setPrintFormat('standard')}
@@ -183,12 +196,38 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
           </div>
 
           <Button
+            variant="outline"
+            size="md"
+            icon={<Banknote className="w-4 h-4 text-emerald-600" />}
+            onClick={() => {
+              kickCashDrawer();
+            }}
+            title="Send pulse to open cash drawer"
+          >
+            Open Drawer
+          </Button>
+
+          <Button
             variant="primary"
             size="md"
             icon={<Printer className="w-4 h-4" />}
             onClick={handlePrint}
           >
             {isReprint ? 'Reprint Invoice' : 'Print Receipt'}
+          </Button>
+
+          <Button
+            variant="outline"
+            size="md"
+            icon={<Share2 className="w-4 h-4 text-emerald-600" />}
+            onClick={() => {
+              const text = generateWhatsAppReceiptText(saleResult, shopProfile);
+              openWhatsAppShare(sale.customer_phone, text);
+            }}
+            className="border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold"
+            title="Send digital receipt directly to customer via WhatsApp"
+          >
+            WhatsApp Bill
           </Button>
 
           {onInitiateReturn && (
@@ -218,13 +257,29 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
 
       {/* Invoice Scroll Container */}
       <div className="flex-1 overflow-y-auto p-4 flex justify-center bg-slate-100 rounded-xl border border-slate-200">
+        <style>{`
+          @media print {
+            @page {
+              margin: 0 !important;
+              size: ${printFormat === 'thermal-58' ? '58mm auto' : printFormat === 'thermal-80' ? '80mm auto' : 'auto'};
+            }
+            body {
+              margin: 0 !important;
+              padding: 0 !important;
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+          }
+        `}</style>
         {/* Printable Paper Canvas */}
         <div
           id="invoice-printable-area"
-          className={`bg-white text-slate-900 shadow-sm border border-slate-200 p-6 print:p-0 print:border-0 print:shadow-none ${
-            printFormat === 'thermal'
-              ? 'receipt-thermal w-[360px] text-xs font-mono'
-              : 'receipt-standard w-full max-w-3xl text-sm font-sans'
+          className={`bg-white text-slate-900 shadow-sm border border-slate-200 print:p-0 print:border-0 print:shadow-none ${
+            printFormat === 'thermal-58'
+              ? 'receipt-thermal w-[260px] p-3 text-[10.5px] font-mono leading-tight'
+              : printFormat === 'thermal-80'
+                ? 'receipt-thermal w-[360px] p-6 text-xs font-mono'
+                : 'receipt-standard w-full max-w-3xl p-6 text-sm font-sans'
           }`}
         >
           {/* ==================================================== */}
@@ -323,6 +378,12 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
                       </td>
                       <td className="py-2 px-3">
                         <div className="font-bold text-slate-900">{item.product_name}</div>
+                        {(item.batch_number || item.expiry_date) && (
+                          <div className="text-[10px] text-slate-600 font-mono">
+                            {item.batch_number && <span>Lot: {item.batch_number} </span>}
+                            {item.expiry_date && <span>· Exp: {item.expiry_date}</span>}
+                          </div>
+                        )}
                         {item.barcode && (
                           <div className="text-[10px] text-slate-500 font-mono">{item.barcode}</div>
                         )}
@@ -374,6 +435,8 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
                       <td className="py-1.5 pr-2 font-medium text-slate-800">
                         <div>{item.product_name}</div>
                         <div className="text-[9px] text-slate-500 font-normal">
+                          {item.batch_number && <span>Lot: {item.batch_number} · </span>}
+                          {item.expiry_date && <span>Exp: {item.expiry_date} · </span>}
                           {item.hsn_code && <span>HSN: {item.hsn_code} · </span>}
                           MRP: ₹{item.mrp.toFixed(2)}
                           {item.gst_rate > 0 && ` · GST ${item.gst_rate}% (₹${item.tax_amount.toFixed(2)})`}
@@ -463,9 +526,17 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
           {/* 6. PAYMENT INFORMATION                               */}
           {/* ==================================================== */}
           <div className="receipt-block border-t border-dashed border-slate-300 mt-3 pt-2 text-[11px] text-slate-600">
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="font-semibold text-slate-700">Payment:</span>
-              <span className="font-bold text-slate-900">{sale.payment_mode}</span>
+              <span className={`font-bold px-2 py-0.5 rounded text-[10px] ${
+                sale.payment_mode === 'SPLIT'
+                  ? 'bg-purple-100 text-purple-900 border border-purple-200'
+                  : sale.payment_mode === 'CREDIT'
+                    ? 'bg-amber-100 text-amber-900 border border-amber-200'
+                    : 'text-slate-900'
+              }`}>
+                {sale.payment_mode === 'SPLIT' ? 'SPLIT (MULTI-TENDER)' : sale.payment_mode}
+              </span>
             </div>
             {sale.payment_mode === 'CASH' && cashReceived !== undefined && cashReceived !== null && (
               <>
@@ -480,8 +551,8 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
               </>
             )}
             {sale.notes && (
-              <div className="mt-1 text-[10px] text-slate-500 italic">
-                Ref / Note: {sale.notes}
+              <div className="mt-1 text-[10px] text-slate-700 font-medium bg-slate-50 p-1.5 rounded border border-slate-200">
+                {sale.notes}
               </div>
             )}
           </div>

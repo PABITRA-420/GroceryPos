@@ -7,8 +7,8 @@ pub mod returns;
 mod settings;
 
 use billing::{
-    BusinessReportFilter, BusinessReportResult, CreateSaleInput, PaginatedSalesResult, SaleRecord,
-    SaleResult, SalesFilterParams,
+    BusinessReportFilter, BusinessReportResult, CreateSaleInput, DayEndSummaryResult,
+    Gstr1ReportResult, PaginatedSalesResult, SaleRecord, SaleResult, SalesFilterParams,
 };
 use customers::{CreateCustomerInput, Customer, CustomerSearchParams, UpdateCustomerInput};
 use db::DbState;
@@ -16,7 +16,10 @@ use inventory::{
     PaginatedStockMovements, StockAdjustmentInput, StockConsistencyReport, StockFilterParams,
     StockMovement,
 };
-use products::{CreateProductInput, Product, ProductFilterParams, UpdateProductInput};
+use products::{
+    BulkImportOptions, BulkImportProductInput, BulkImportSummary, CreateProductInput, Product,
+    ProductFilterParams, UpdateProductInput,
+};
 use returns::{
     CreateReturnInput, PaginatedReturnsResult, ReturnableItemInfo, ReturnsFilterParams,
     SalesReturnResult,
@@ -110,6 +113,16 @@ fn delete_product(state: State<'_, DbState>, id: i64) -> Result<bool, String> {
 #[tauri::command]
 fn search_products(state: State<'_, DbState>, query: String) -> Result<Vec<Product>, String> {
     state.with_conn(|conn| products::search_products_db(conn, query))
+}
+
+/// Native command to bulk import products from CSV / Excel with stock ledger integration
+#[tauri::command]
+fn bulk_import_products(
+    state: State<'_, DbState>,
+    products: Vec<BulkImportProductInput>,
+    options: BulkImportOptions,
+) -> Result<BulkImportSummary, String> {
+    state.with_conn(|conn| products::bulk_import_products_db(conn, products, options))
 }
 
 // ==========================================
@@ -218,6 +231,24 @@ fn get_business_report(
     filter: Option<BusinessReportFilter>,
 ) -> Result<BusinessReportResult, String> {
     state.with_conn(|conn| billing::get_business_report_db(conn, filter.unwrap_or_default()))
+}
+
+/// Native command to generate GSTR-1 compliant tax filing report (Table 4 B2B, Table 7 B2C, Table 12 HSN)
+#[tauri::command]
+fn get_gstr1_report(
+    state: State<'_, DbState>,
+    filter: Option<BusinessReportFilter>,
+) -> Result<Gstr1ReportResult, String> {
+    state.with_conn(|conn| billing::get_gstr1_report_db(conn, filter.unwrap_or_default()))
+}
+
+/// Native command to compute Day-End Cash Drawer Reconciliation (Z-Report)
+#[tauri::command]
+fn get_day_end_summary(
+    state: State<'_, DbState>,
+    target_date: Option<String>,
+) -> Result<DayEndSummaryResult, String> {
+    state.with_conn(|conn| billing::get_day_end_summary_db(conn, target_date))
 }
 
 // ==========================================
@@ -364,6 +395,62 @@ fn restore_database_backup(
     db::restore_database_from_backup(&state, &source_file_path)
 }
 
+/// Native command to open a file selection dialog (Windows OpenFileDialog)
+#[tauri::command]
+fn open_file_dialog(filter_name: String, extension: String) -> Result<Option<String>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = '{} (*.{})|*.{}|All files (*.*)|*.*'; if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output $dlg.FileName }}",
+            filter_name, extension, extension
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .map_err(|e| format!("Failed to launch file dialog: {}", e))?;
+
+        let res = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if res.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(res))
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(None)
+    }
+}
+
+/// Native command to open a file save dialog (Windows SaveFileDialog)
+#[tauri::command]
+fn save_file_dialog(default_name: String, extension: String) -> Result<Option<String>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $dlg = New-Object System.Windows.Forms.SaveFileDialog; $dlg.Filter = 'Files (*.{})|*.{}'; $dlg.FileName = '{}'; if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output $dlg.FileName }}",
+            extension, extension, default_name
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .map_err(|e| format!("Failed to launch save dialog: {}", e))?;
+
+        let res = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if res.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(res))
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(None)
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -397,6 +484,7 @@ pub fn run() {
             update_product,
             delete_product,
             search_products,
+            bulk_import_products,
             create_customer,
             get_customers,
             get_customer,
@@ -409,6 +497,8 @@ pub fn run() {
             get_recent_sales,
             get_sales_history,
             get_business_report,
+            get_gstr1_report,
+            get_day_end_summary,
             get_shop_profile,
             save_shop_profile,
             get_returnable_items,
@@ -419,7 +509,9 @@ pub fn run() {
             get_stock_ledger,
             check_stock_consistency,
             export_database_backup,
-            restore_database_backup
+            restore_database_backup,
+            open_file_dialog,
+            save_file_dialog
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

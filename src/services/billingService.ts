@@ -10,6 +10,8 @@ import type {
   SaleListItem,
   BusinessReportFilter,
   BusinessReportResult,
+  Gstr1ReportResult,
+  DayEndSummaryResult,
 } from '../types';
 
 /**
@@ -510,6 +512,67 @@ export const billingService = {
       customers,
       top_products,
       sales: salesList,
+    };
+  },
+
+  /**
+   * Generates GSTR-1 compliant tax report (Table 4 B2B, Table 7 B2C, Table 12 HSN)
+   */
+  async getGstr1Report(filter?: BusinessReportFilter): Promise<Gstr1ReportResult> {
+    if (isTauriEnvironment()) {
+      return await invoke<Gstr1ReportResult>('get_gstr1_report', { filter });
+    }
+    return {
+      period_label: filter?.date_preset || 'Current Period',
+      shop_gstin: previewProfile.shop_gstin,
+      shop_name: previewProfile.shop_name,
+      total_b2b_invoices: 0,
+      total_b2b_taxable: 0,
+      total_b2b_tax: 0,
+      total_b2c_invoices: previewSales.length,
+      total_b2c_taxable: previewSales.reduce((sum, s) => sum + s.sale.subtotal, 0),
+      total_b2c_tax: previewSales.reduce((sum, s) => sum + s.sale.tax_amount, 0),
+      b2b_table4: [],
+      b2c_table7: [
+        {
+          tax_rate: 5,
+          taxable_value: previewSales.reduce((sum, s) => sum + s.sale.subtotal, 0),
+          central_tax: previewSales.reduce((sum, s) => sum + s.sale.tax_amount / 2, 0),
+          state_tax: previewSales.reduce((sum, s) => sum + s.sale.tax_amount / 2, 0),
+          invoice_count: previewSales.length,
+          total_value: previewSales.reduce((sum, s) => sum + s.sale.total_amount, 0),
+        },
+      ],
+      hsn_table12: [],
+    };
+  },
+
+  /**
+   * Day-End Cash Drawer Reconciliation (Z-Report)
+   */
+  async getDayEndSummary(targetDate?: string): Promise<DayEndSummaryResult> {
+    if (isTauriEnvironment()) {
+      return await invoke<DayEndSummaryResult>('get_day_end_summary', { targetDate });
+    }
+    const todaySales = previewSales;
+    const cashSales = todaySales.filter(s => s.sale.payment_mode === 'CASH').reduce((sum, s) => sum + s.sale.total_amount, 0);
+    const upiSales = todaySales.filter(s => s.sale.payment_mode === 'UPI').reduce((sum, s) => sum + s.sale.total_amount, 0);
+    const cardSales = todaySales.filter(s => s.sale.payment_mode === 'CARD').reduce((sum, s) => sum + s.sale.total_amount, 0);
+    const totalSales = todaySales.reduce((sum, s) => sum + s.sale.total_amount, 0);
+    return {
+      report_date: targetDate || new Date().toISOString().slice(0, 10),
+      generated_at: new Date().toISOString(),
+      shop_name: previewProfile.shop_name,
+      total_invoices: todaySales.length,
+      total_sales_revenue: totalSales,
+      cash_sales: cashSales,
+      upi_sales: upiSales,
+      card_sales: cardSales,
+      split_sales: 0,
+      total_returns_count: 0,
+      total_refund_amount: 0,
+      cash_refund_amount: 0,
+      net_cash_inflow: cashSales,
     };
   },
 };

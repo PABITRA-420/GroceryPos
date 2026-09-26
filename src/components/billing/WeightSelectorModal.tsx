@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useId } from 'react';
-import { Scale, IndianRupee, X, Check, Calculator } from 'lucide-react';
+import { Scale, IndianRupee, X, Check, Calculator, RefreshCw, Power, Radio, Zap } from 'lucide-react';
 import type { CartItem } from '../../types';
+import { weighingScaleService, type ScaleReading, type ScaleConnectionStatus } from '../../services/weighingScaleService';
 
 interface WeightSelectorModalProps {
   isOpen: boolean;
@@ -31,14 +32,41 @@ export const WeightSelectorModal: React.FC<WeightSelectorModalProps> = ({
   item,
   onApply,
 }) => {
-  const [activeTab, setActiveTab] = useState<'weight' | 'reverse'>('weight');
+  const [activeTab, setActiveTab] = useState<'scale' | 'weight' | 'reverse'>('scale');
   const [quantityKg, setQuantityKg] = useState<number>(1);
   const [gramsInput, setGramsInput] = useState<string>('1000');
   const [reverseRupees, setReverseRupees] = useState<string>('50');
 
+  // Scale states
+  const [scaleReading, setScaleReading] = useState<ScaleReading>(weighingScaleService.getLatestReading());
+  const [scaleStatus, setScaleStatus] = useState<ScaleConnectionStatus>(weighingScaleService.getStatus());
+  const [scaleError, setScaleError] = useState<string>('');
+  const [isSimulating, setIsSimulating] = useState<boolean>(weighingScaleService.getConfig().simulationMode);
+
   const gramsInputId = useId();
   const kgInputId = useId();
   const reverseRupeesInputId = useId();
+
+  // Subscribe to weighing scale streams
+  useEffect(() => {
+    const unsubWeight = weighingScaleService.onWeightChange((reading) => {
+      setScaleReading(reading);
+      if (activeTab === 'scale' && reading.weightKg > 0) {
+        setQuantityKg(reading.weightKg);
+        setGramsInput(Math.round(reading.weightKg * 1000).toString());
+      }
+    });
+
+    const unsubStatus = weighingScaleService.onStatusChange((status, err) => {
+      setScaleStatus(status);
+      setScaleError(err || '');
+    });
+
+    return () => {
+      unsubWeight();
+      unsubStatus();
+    };
+  }, [activeTab]);
 
   useEffect(() => {
     if (item && isOpen) {
@@ -50,6 +78,34 @@ export const WeightSelectorModal: React.FC<WeightSelectorModalProps> = ({
       }
     }
   }, [item, isOpen]);
+
+  const handleConnectScale = async () => {
+    if (scaleStatus === 'connected') {
+      await weighingScaleService.disconnect();
+    } else {
+      await weighingScaleService.connect();
+    }
+  };
+
+  const handleTareScale = () => {
+    weighingScaleService.tare();
+  };
+
+  const handleSimulateWeight = (kg: number) => {
+    weighingScaleService.setSimulatedWeight(kg);
+    setQuantityKg(kg);
+    setGramsInput(Math.round(kg * 1000).toString());
+  };
+
+  const handleToggleSimulation = () => {
+    const nextVal = !isSimulating;
+    setIsSimulating(nextVal);
+    weighingScaleService.saveConfig({ simulationMode: nextVal });
+    if (nextVal) {
+      weighingScaleService.setSimulatedWeight(1.250);
+      setQuantityKg(1.250);
+    }
+  };
 
   if (!isOpen || !item) return null;
 
@@ -95,7 +151,6 @@ export const WeightSelectorModal: React.FC<WeightSelectorModalProps> = ({
     setReverseRupees(valStr);
     const rupees = parseFloat(valStr);
     if (!isNaN(rupees) && rupees > 0 && unitPrice > 0) {
-      // Calculate weight: amount / unitPrice rounded to 3 decimal places (nearest gram)
       const computedKg = Math.round((rupees / unitPrice) * 1000) / 1000;
       setQuantityKg(computedKg);
       setGramsInput(Math.round(computedKg * 1000).toString());
@@ -154,32 +209,141 @@ export const WeightSelectorModal: React.FC<WeightSelectorModalProps> = ({
         <div className="flex border-b border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/50 p-1.5 mx-6 mt-4 rounded-xl">
           <button
             type="button"
+            onClick={() => setActiveTab('scale')}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold rounded-lg transition ${
+              activeTab === 'scale'
+                ? 'bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <Radio className="w-3.5 h-3.5 text-emerald-500 animate-pulse" />
+            Electronic Scale
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab('weight')}
-            className={`flex-1 flex items-center justify-center gap-2 py-2 text-xs font-semibold rounded-lg transition ${
+            className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold rounded-lg transition ${
               activeTab === 'weight'
                 ? 'bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm'
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
             }`}
           >
             <Scale className="w-3.5 h-3.5" />
-            Weight Presets & Grams
+            Weight Presets
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('reverse')}
-            className={`flex-1 flex items-center justify-center gap-2 py-2 text-xs font-semibold rounded-lg transition ${
+            className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold rounded-lg transition ${
               activeTab === 'reverse'
                 ? 'bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm'
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
             }`}
           >
             <IndianRupee className="w-3.5 h-3.5" />
-            ₹ Amount to Weight
+            ₹ to Weight
           </button>
         </div>
 
         {/* Content Body */}
         <div className="p-6 space-y-5">
+          {activeTab === 'scale' && (
+            <div className="space-y-4">
+              {/* Digital LED 7-Segment Weight Display */}
+              <div className="bg-slate-950 rounded-2xl p-5 border border-slate-800 shadow-inner flex flex-col items-center justify-center relative">
+                <div className="w-full flex items-center justify-between text-[11px] mb-2 px-1">
+                  <span className="flex items-center gap-1.5 font-semibold text-slate-400">
+                    <span className={`w-2 h-2 rounded-full ${scaleStatus === 'connected' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                    {scaleStatus === 'connected' ? 'COM PORT CONNECTED (9600 8-N-1)' : isSimulating ? 'SIMULATION MODE' : 'OFFLINE / DISCONNECTED'}
+                  </span>
+                  <span className="font-mono text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/50">
+                    {scaleReading.isStable ? '● STABLE' : '○ MOTION'}
+                  </span>
+                </div>
+
+                {/* Big Digital Readout */}
+                <div className="py-2 flex items-baseline gap-3">
+                  <span className="font-mono text-5xl font-black tracking-widest text-emerald-400 drop-shadow-[0_0_15px_rgba(16,185,129,0.4)]">
+                    {scaleReading.weightKg.toFixed(3)}
+                  </span>
+                  <span className="text-xl font-bold font-mono text-emerald-600 uppercase">
+                    Kg
+                  </span>
+                </div>
+
+                <div className="mt-2 text-xs font-mono text-slate-400">
+                  Rate: ₹{unitPrice.toFixed(2)}/kg • Net: <strong className="text-white">₹{(scaleReading.weightKg * unitPrice).toFixed(2)}</strong>
+                </div>
+
+                {scaleError && (
+                  <div className="mt-2 text-[11px] text-amber-400 bg-amber-950/40 px-3 py-1 rounded border border-amber-800/40">
+                    {scaleError}
+                  </div>
+                )}
+              </div>
+
+              {/* Hardware / Scale Actions Row */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleConnectScale}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold border transition ${
+                    scaleStatus === 'connected'
+                      ? 'border-red-300 dark:border-red-800 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40'
+                      : 'border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  <Power className="w-3.5 h-3.5" />
+                  {scaleStatus === 'connected' ? 'Disconnect COM' : 'Connect Scale Port'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleTareScale}
+                  className="flex items-center justify-center gap-1.5 py-2 px-4 rounded-xl text-xs font-semibold border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 transition"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Zero / Tare
+                </button>
+                <button
+                  type="button"
+                  onClick={handleToggleSimulation}
+                  className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold border transition ${
+                    isSimulating
+                      ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-bold'
+                      : 'border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  {isSimulating ? 'Sim Active' : 'Sim Mode'}
+                </button>
+              </div>
+
+              {/* Simulation Quick Weights (when simulation is active or no physical scale) */}
+              {isSimulating && (
+                <div className="bg-slate-50 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-200 dark:border-slate-700">
+                  <div className="text-[11px] font-semibold text-slate-500 mb-2">
+                    Test Weights on Scale:
+                  </div>
+                  <div className="grid grid-cols-5 gap-1.5">
+                    {[0.100, 0.250, 0.500, 1.000, 2.500].map((w) => (
+                      <button
+                        key={w}
+                        type="button"
+                        onClick={() => handleSimulateWeight(w)}
+                        className={`py-1.5 text-xs font-bold rounded-lg border transition ${
+                          Math.abs(scaleReading.weightKg - w) < 0.001
+                            ? 'bg-emerald-600 text-white border-emerald-600 shadow'
+                            : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-slate-400'
+                        }`}
+                      >
+                        {w >= 1 ? `${w}kg` : `${w * 1000}g`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           {activeTab === 'weight' ? (
             <>
               {/* Quick Preset Chips */}

@@ -101,6 +101,8 @@ export interface Product {
   gst_rate: number;
   stock: number;
   minimum_stock: number;
+  expiry_date?: string | null;
+  batch_number?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -120,6 +122,8 @@ export interface CreateProductInput {
   gst_rate?: number | null;
   stock?: number | null;
   minimum_stock?: number | null;
+  expiry_date?: string | null;
+  batch_number?: string | null;
 }
 
 /**
@@ -138,6 +142,8 @@ export interface UpdateProductInput {
   gst_rate?: number | null;
   stock?: number | null;
   minimum_stock?: number | null;
+  expiry_date?: string | null;
+  batch_number?: string | null;
 }
 
 /**
@@ -163,7 +169,7 @@ export interface Sale {
   discount_amount: number;
   tax_amount: number;
   total_amount: number;
-  payment_mode: 'CASH' | 'UPI' | 'CARD' | 'CREDIT';
+  payment_mode: 'CASH' | 'UPI' | 'CARD' | 'CREDIT' | 'SPLIT';
   payment_status: 'PAID' | 'PENDING' | 'PARTIAL';
   notes?: string | null;
   created_at: string;
@@ -186,6 +192,8 @@ export interface SaleItem {
   gst_rate: number;
   tax_amount: number;
   total_price: number;
+  expiry_date?: string | null;
+  batch_number?: string | null;
 }
 
 /**
@@ -202,6 +210,19 @@ export interface CartItem {
   mrp: number;
   gst_rate: number;
   current_stock: number;
+  expiry_date?: string | null;
+  batch_number?: string | null;
+}
+
+/**
+ * Split payment detail breakdown
+ */
+export interface SplitPaymentDetail {
+  cash: number;
+  upi: number;
+  card: number;
+  upi_ref?: string;
+  card_ref?: string;
 }
 
 /**
@@ -221,11 +242,53 @@ export interface CreateSaleInput {
     unit_price: number;
     mrp: number;
     gst_rate: number;
+    expiry_date?: string | null;
+    batch_number?: string | null;
   }[];
   discount_amount: number;
-  payment_mode: 'CASH' | 'UPI' | 'CARD' | 'CREDIT';
+  payment_mode: 'CASH' | 'UPI' | 'CARD' | 'CREDIT' | 'SPLIT';
   notes?: string | null;
   round_off?: number | null;
+  split_cash?: number | null;
+  split_upi?: number | null;
+  split_card?: number | null;
+}
+
+/**
+ * Bulk product import item payload
+ */
+export interface BulkImportProductInput {
+  name: string;
+  barcode?: string | null;
+  category?: string | null;
+  unit: string;
+  purchase_price?: number | null;
+  selling_price: number;
+  mrp?: number | null;
+  gst_rate?: number | null;
+  stock?: number | null;
+  minimum_stock?: number | null;
+  hsn_code?: string | null;
+  expiry_date?: string | null;
+  batch_number?: string | null;
+}
+
+/**
+ * Bulk product import execution options
+ */
+export interface BulkImportOptions {
+  update_existing_barcodes: boolean;
+}
+
+/**
+ * Summary result of bulk catalog import
+ */
+export interface BulkImportSummary {
+  total: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  errors: string[];
 }
 
 /**
@@ -264,7 +327,7 @@ export interface SaleListItem {
   discount_amount: number;
   tax_amount: number;
   total_amount: number;
-  payment_mode: 'CASH' | 'UPI' | 'CARD' | 'CREDIT';
+  payment_mode: 'CASH' | 'UPI' | 'CARD' | 'CREDIT' | 'SPLIT';
   payment_status: 'PAID' | 'PENDING' | 'PARTIAL';
   notes?: string | null;
   created_at: string;
@@ -295,6 +358,7 @@ export interface ShopProfile {
   shop_gstin?: string | null;
   shop_upi_id?: string | null;
   invoice_footer: string;
+  manager_pin?: string | null;
 }
 
 /**
@@ -556,6 +620,102 @@ export interface BusinessReportResult {
   customers: CustomerSpendItem[];
   top_products: TopSellingProductItem[];
   sales: SaleListItem[];
+}
+
+/**
+ * GSTR-1 Table 4: B2B Invoices (Sales to GST Registered Customers)
+ */
+export interface Gstr1B2bItem {
+  gstin: string;
+  customer_name: string;
+  invoice_number: string;
+  invoice_date: string;
+  invoice_value: number;
+  place_of_supply: string;
+  reverse_charge: string;
+  applicable_tax_rate: number;
+  taxable_value: number;
+  central_tax: number;
+  state_tax: number;
+}
+
+/**
+ * GSTR-1 Table 7: B2C (Small) Invoices (Grouped by Tax Rate)
+ */
+export interface Gstr1B2cItem {
+  tax_rate: number;
+  taxable_value: number;
+  central_tax: number;
+  state_tax: number;
+  invoice_count: number;
+  total_value: number;
+}
+
+/**
+ * GSTR-1 Table 12: HSN-wise Summary of Outward Supplies
+ */
+export interface Gstr1HsnItem {
+  hsn_code: string;
+  description: string;
+  uqc: string;
+  total_quantity: number;
+  total_value: number;
+  taxable_value: number;
+  central_tax: number;
+  state_tax: number;
+}
+
+/**
+ * Full GSTR-1 Tax Report Envelope
+ */
+export interface Gstr1ReportResult {
+  period_label: string;
+  shop_gstin?: string | null;
+  shop_name: string;
+  total_b2b_invoices: number;
+  total_b2b_taxable: number;
+  total_b2b_tax: number;
+  total_b2c_invoices: number;
+  total_b2c_taxable: number;
+  total_b2c_tax: number;
+  b2b_table4: Gstr1B2bItem[];
+  b2c_table7: Gstr1B2cItem[];
+  hsn_table12: Gstr1HsnItem[];
+}
+
+/**
+ * Day-End Cash Drawer Reconciliation (Z-Report / Shift Close)
+ */
+export interface DayEndSummaryResult {
+  report_date: string;
+  generated_at: string;
+  shop_name: string;
+  total_invoices: number;
+  total_sales_revenue: number;
+  cash_sales: number;
+  upi_sales: number;
+  card_sales: number;
+  split_sales: number;
+  total_returns_count: number;
+  total_refund_amount: number;
+  cash_refund_amount: number;
+  net_cash_inflow: number;
+}
+
+/**
+ * Loose Goods Barcode Sticker Label Configuration
+ */
+export interface BarcodeLabelConfig {
+  product_id?: number | null;
+  product_name: string;
+  weight_label: string;
+  mrp: number;
+  selling_price: number;
+  packed_date: string;
+  best_before?: string;
+  batch_no?: string;
+  barcode: string;
+  quantity: number;
 }
 
 

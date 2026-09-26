@@ -1,9 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { MainLayout } from './layouts/MainLayout';
 import { useTauriBridge } from './hooks/useTauriBridge';
 import { Modal } from './components/ui/Modal';
 import { Button } from './components/ui/Button';
-import type { NavigationTab } from './types';
+import type { NavigationTab, ShopProfile } from './types';
+import { authService, type AuthState } from './services/authService';
+import { billingService } from './services/billingService';
+import { PinAuthModal } from './components/auth/PinAuthModal';
 
 // Page components
 import { DashboardPage } from './pages/Dashboard/DashboardPage';
@@ -20,11 +23,26 @@ export const App: React.FC = () => {
   const [billingCartCount, setBillingCartCount] = useState<number>(0);
   const [pendingTab, setPendingTab] = useState<NavigationTab | null>(null);
   const [isDiscardModalOpen, setIsDiscardModalOpen] = useState(false);
+  const [authState, setAuthState] = useState<AuthState>(authService.getState());
+  const [shopProfile, setShopProfile] = useState<ShopProfile | null>(null);
+  const [isSettingsPinModalOpen, setIsSettingsPinModalOpen] = useState(false);
 
   const { systemInfo, isLoading, isNative } = useTauriBridge();
 
+  useEffect(() => {
+    const unsub = authService.subscribe(setAuthState);
+    billingService.getShopProfile().then(setShopProfile).catch(() => {});
+    return unsub;
+  }, []);
+
   const handleTabChange = (tab: NavigationTab) => {
     if (tab === currentTab) return;
+
+    // Guard Settings page if not manager
+    if (tab === 'settings' && !authService.isManager()) {
+      setIsSettingsPinModalOpen(true);
+      return;
+    }
 
     // Unsaved bill protection: if leaving billing with items in cart, prompt merchant
     if (currentTab === 'billing' && billingCartCount > 0) {
@@ -123,6 +141,31 @@ export const App: React.FC = () => {
           </div>
         </div>
       </Modal>
+
+      {/* Settings PIN Authorization Modal */}
+      <PinAuthModal
+        isOpen={isSettingsPinModalOpen}
+        onClose={() => setIsSettingsPinModalOpen(false)}
+        onSuccess={() => {
+          setIsSettingsPinModalOpen(false);
+          authService.verifyManagerPin(shopProfile?.manager_pin || '1234', shopProfile?.manager_pin || '1234');
+          setCurrentTab('settings');
+        }}
+        title="Settings Authorization"
+        description="Enter Manager PIN to access System Settings & Database"
+        configuredPin={shopProfile?.manager_pin || '1234'}
+      />
+
+      {/* POS Terminal Lock Screen */}
+      <PinAuthModal
+        isOpen={authState.isLocked}
+        onClose={() => {}}
+        onSuccess={() => authService.unlockTerminal(shopProfile?.manager_pin || '1234', shopProfile?.manager_pin || '1234')}
+        title="POS Terminal Locked"
+        description="Enter PIN to resume billing"
+        configuredPin={shopProfile?.manager_pin || '1234'}
+        isLockScreen={true}
+      />
     </>
   );
 };

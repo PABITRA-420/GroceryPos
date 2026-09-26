@@ -17,12 +17,17 @@ import {
   History,
   X,
   Scale,
+  PauseCircle,
+  Split,
+  AlertTriangle,
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Modal } from '../../components/ui/Modal';
 import { InvoiceReceipt } from '../../components/billing/InvoiceReceipt';
 import { WeightSelectorModal } from '../../components/billing/WeightSelectorModal';
 import { UpiQrModal } from '../../components/billing/UpiQrModal';
+import { ParkedBillsModal } from '../../components/billing/ParkedBillsModal';
+import { parkedBillService, type ParkedBill } from '../../services/parkedBillService';
 import { productService } from '../../services/productService';
 import { customerService } from '../../services/customerService';
 import {
@@ -87,9 +92,20 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
   // State: Billing Calculations & Payment
   // ----------------------------------------------------
   const [discountAmount, setDiscountAmount] = useState<number>(0);
-  const [paymentMode, setPaymentMode] = useState<'CASH' | 'UPI' | 'CARD'>('CASH');
+  const [paymentMode, setPaymentMode] = useState<'CASH' | 'UPI' | 'CARD' | 'SPLIT'>('CASH');
   const [cashReceived, setCashReceived] = useState<string>('');
   const [paymentNotes, setPaymentNotes] = useState<string>('');
+  const [splitCash, setSplitCash] = useState<string>('');
+  const [splitUpi, setSplitUpi] = useState<string>('');
+  const [splitCard, setSplitCard] = useState<string>('');
+
+  // ----------------------------------------------------
+  // State: Parked / Held Bills (Queue Management)
+  // ----------------------------------------------------
+  const [parkedBills, setParkedBills] = useState<ParkedBill[]>(() => parkedBillService.getParkedBills());
+  const [isParkedModalOpen, setIsParkedModalOpen] = useState(false);
+  const [parkConfirmPrompt, setParkConfirmPrompt] = useState<ParkedBill | null>(null);
+  const [holdSuccessMessage, setHoldSuccessMessage] = useState<string | null>(null);
 
   // ----------------------------------------------------
   // State: Post-Sale & Invoice
@@ -141,7 +157,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
     }
   };
 
-  // Keyboard shortcut listener (F2 to focus search, Escape to close modals)
+  // Keyboard shortcut listener (F2 to focus search, F6 to hold, F4 for customer, Escape to close modals)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'F2') {
@@ -151,12 +167,30 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
       }
       if (e.key === 'F4') {
         e.preventDefault();
+        e.stopPropagation();
         setIsCustomerModalOpen(true);
+      }
+      if (e.key === 'F5') {
+        // Prevent accidental browser / webview refresh which wipes active cart
+        e.preventDefault();
+      }
+      if (e.key === 'F6') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (cart.length > 0) {
+          handleParkCurrentBill();
+        } else {
+          setIsParkedModalOpen(true);
+        }
       }
       if (e.key === 'Escape') {
         if (completedSale) {
           // If invoice preview is open, Esc starts a new bill
           handleNewBill();
+        } else if (isParkedModalOpen) {
+          setIsParkedModalOpen(false);
+        } else if (parkConfirmPrompt) {
+          setParkConfirmPrompt(null);
         } else if (isCustomerModalOpen) {
           setIsCustomerModalOpen(false);
         } else if (isQuickAddCustomerOpen) {
@@ -169,7 +203,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [completedSale, isCustomerModalOpen, isQuickAddCustomerOpen, isRecentSalesOpen]);
+  }, [completedSale, isCustomerModalOpen, isQuickAddCustomerOpen, isRecentSalesOpen, isParkedModalOpen, parkConfirmPrompt, cart.length]);
 
   // Auto-focus search input when returning to billing or on mount
   useEffect(() => {
@@ -257,6 +291,8 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
   // ----------------------------------------------------
   // Cart Actions & Inventory Validation
   // ----------------------------------------------------
+  const [expiredPromptProduct, setExpiredPromptProduct] = useState<Product | null>(null);
+
   const addProductToCart = (product: Product) => {
     setErrorMessage(null);
     setStockWarning(null);
@@ -268,6 +304,22 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
       return;
     }
 
+    // Guard: Expiry safety warning for perishable grocery items
+    if (product.expiry_date) {
+      const exp = new Date(product.expiry_date);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      exp.setHours(0, 0, 0, 0);
+      if (exp < today) {
+        setExpiredPromptProduct(product);
+        return;
+      }
+    }
+
+    doAddProductToCart(product);
+  };
+
+  const doAddProductToCart = (product: Product) => {
     setCart((prevCart) => {
       const existingIndex = prevCart.findIndex(
         (item) => item.product_id === product.id
@@ -304,6 +356,8 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
           mrp: product.mrp,
           gst_rate: product.gst_rate,
           current_stock: product.stock,
+          expiry_date: product.expiry_date || null,
+          batch_number: product.batch_number || null,
         };
         return [...prevCart, newItem];
       }
@@ -442,11 +496,87 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
     setPaymentMode('CASH');
     setCashReceived('');
     setPaymentNotes('');
+    setSplitCash('');
+    setSplitUpi('');
+    setSplitCard('');
     setErrorMessage(null);
     setStockWarning(null);
     setCompletedSale(null);
     setDiscardConfirmOpen(false);
     searchInputRef.current?.focus();
+  };
+
+  // ----------------------------------------------------
+  // Hold / Park Bill Operations
+  // ----------------------------------------------------
+  const handleParkCurrentBill = () => {
+    if (cart.length === 0) {
+      setStockWarning('Cannot hold an empty bill. Add items before parking.');
+      setTimeout(() => setStockWarning(null), 3000);
+      return;
+    }
+
+    const parked = parkedBillService.parkBill({
+      cart,
+      customer: selectedCustomer,
+      customer_phone_input: customerPhoneInput,
+      new_customer_name: newCustomerName,
+      new_customer_address: newCustomerAddress,
+      discount_amount: discountAmount,
+      payment_mode: paymentMode,
+      payment_notes: paymentNotes,
+      total_amount: calculations.grandTotal,
+    });
+
+    setParkedBills(parkedBillService.getParkedBills());
+    resetBill();
+    setHoldSuccessMessage(`Cart placed on hold as Hold #${parked.token_number}! Ready for next customer.`);
+    setTimeout(() => setHoldSuccessMessage(null), 3500);
+  };
+
+  const handleResumeParkedBill = (bill: ParkedBill) => {
+    if (cart.length > 0) {
+      setParkConfirmPrompt(bill);
+      return;
+    }
+    executeResumeBill(bill);
+  };
+
+  const executeResumeBill = (bill: ParkedBill) => {
+    parkedBillService.recallParkedBill(bill.id);
+    setParkedBills(parkedBillService.getParkedBills());
+    setCart(bill.cart);
+    setSelectedCustomer(bill.customer);
+    setCustomerPhoneInput(bill.customer_phone_input || '');
+    setNewCustomerName(bill.new_customer_name || '');
+    setNewCustomerAddress(bill.new_customer_address || '');
+    setDiscountAmount(bill.discount_amount);
+    setPaymentMode(bill.payment_mode === 'CREDIT' ? 'CASH' : bill.payment_mode);
+    setPaymentNotes(bill.payment_notes);
+    setIsParkedModalOpen(false);
+    setParkConfirmPrompt(null);
+    setHoldSuccessMessage(`Hold #${bill.token_number} restored to counter.`);
+    setTimeout(() => setHoldSuccessMessage(null), 3500);
+  };
+
+  const handleParkCurrentAndResumeHeld = (bill: ParkedBill) => {
+    parkedBillService.parkBill({
+      cart,
+      customer: selectedCustomer,
+      customer_phone_input: customerPhoneInput,
+      new_customer_name: newCustomerName,
+      new_customer_address: newCustomerAddress,
+      discount_amount: discountAmount,
+      payment_mode: paymentMode,
+      payment_notes: paymentNotes,
+      total_amount: calculations.grandTotal,
+    });
+    executeResumeBill(bill);
+  };
+
+  const handleDiscardParkedBill = (id: string) => {
+    parkedBillService.discardParkedBill(id);
+    setParkedBills(parkedBillService.getParkedBills());
   };
 
   // ----------------------------------------------------
@@ -491,6 +621,23 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
       totalItemsCount: cart.reduce((sum, item) => sum + item.quantity, 0),
     };
   }, [cart, discountAmount, paymentMode, cashReceived]);
+
+  // Split payment totals calculation
+  const splitTotals = useMemo(() => {
+    const c = parseFloat(splitCash) || 0;
+    const u = parseFloat(splitUpi) || 0;
+    const cd = parseFloat(splitCard) || 0;
+    const totalTendered = Math.round((c + u + cd) * 100) / 100;
+    const remaining = Math.round((calculations.grandTotal - totalTendered) * 100) / 100;
+    return {
+      cash: c,
+      upi: u,
+      card: cd,
+      totalTendered,
+      remaining,
+      isSufficient: totalTendered >= calculations.grandTotal,
+    };
+  }, [splitCash, splitUpi, splitCard, calculations.grandTotal]);
 
   // Set exact cash tender shortcut
   const handleSetExactCash = () => {
@@ -563,6 +710,15 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
       return;
     }
 
+    if (paymentMode === 'SPLIT' && !splitTotals.isSufficient) {
+      setErrorMessage(
+        `Split tender is short by ₹${splitTotals.remaining.toFixed(2)}. Total is ${formatCurrency(
+          calculations.grandTotal
+        )}, but tendered amount is ₹${splitTotals.totalTendered.toFixed(2)}.`
+      );
+      return;
+    }
+
     try {
       setIsSubmitting(true);
 
@@ -618,11 +774,16 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
           unit_price: item.unit_price,
           mrp: item.mrp,
           gst_rate: item.gst_rate,
+          expiry_date: item.expiry_date || null,
+          batch_number: item.batch_number || null,
         })),
         discount_amount: calculations.discount,
         payment_mode: paymentMode,
         notes: paymentNotes.trim() || null,
         round_off: calculations.roundOff,
+        split_cash: paymentMode === 'SPLIT' ? splitTotals.cash : null,
+        split_upi: paymentMode === 'SPLIT' ? splitTotals.upi : null,
+        split_card: paymentMode === 'SPLIT' ? splitTotals.card : null,
       };
 
       const result = await billingService.completeSale(saleInput);
@@ -711,7 +872,34 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
           </span>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5 flex-wrap">
+          {/* Hold / Park Bill Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            icon={<PauseCircle className="w-3.5 h-3.5 text-amber-600" />}
+            onClick={handleParkCurrentBill}
+            disabled={cart.length === 0}
+            title="Hold current cart to serve next customer (F6)"
+            className="border-amber-300 bg-amber-50/70 hover:bg-amber-100 text-amber-900 font-semibold cursor-pointer"
+          >
+            Hold Bill (F6)
+          </Button>
+
+          {/* Held Carts Badge Button */}
+          <button
+            type="button"
+            onClick={() => setIsParkedModalOpen(true)}
+            className={`px-2.5 py-1.5 rounded-lg border text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              parkedBills.length > 0
+                ? 'border-amber-400 bg-amber-500 text-white shadow-2xs'
+                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <PauseCircle className="w-3.5 h-3.5" />
+            <span>Held ({parkedBills.length})</span>
+          </button>
+
           <Button
             variant="outline"
             size="sm"
@@ -733,6 +921,19 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
           )}
         </div>
       </div>
+
+      {/* Hold Success Notification */}
+      {holdSuccessMessage && (
+        <div className="bg-amber-600 text-white text-xs font-semibold px-6 py-2 flex items-center justify-between shadow-xs shrink-0">
+          <div className="flex items-center gap-2">
+            <PauseCircle className="w-4 h-4" />
+            <span>{holdSuccessMessage}</span>
+          </div>
+          <button onClick={() => setHoldSuccessMessage(null)} className="cursor-pointer">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Warnings & Alerts */}
       {stockWarning && (
@@ -1095,6 +1296,20 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
                         <div className="font-bold text-slate-900 leading-tight">
                           {item.product_name}
                         </div>
+                        {(item.batch_number || item.expiry_date) && (
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            {item.batch_number && (
+                              <span className="text-[9px] font-mono px-1 py-0.2 bg-slate-100 text-slate-600 rounded border border-slate-200">
+                                Lot: {item.batch_number}
+                              </span>
+                            )}
+                            {item.expiry_date && (
+                              <span className="text-[9px] px-1 py-0.2 bg-amber-50 text-amber-800 rounded border border-amber-200">
+                                Exp: {item.expiry_date}
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
                           <span>₹{item.unit_price.toFixed(2)} / {item.unit}</span>
                           {item.gst_rate > 0 && <span>· GST {item.gst_rate}%</span>}
@@ -1233,44 +1448,142 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
 
             {/* Payment Mode Selector */}
             <div className="pt-2 border-t border-slate-200">
-              <div className="grid grid-cols-3 gap-2 mb-2">
+              <div className="grid grid-cols-4 gap-1.5 mb-2">
                 <button
                   type="button"
                   onClick={() => setPaymentMode('CASH')}
-                  className={`py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  className={`py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-1 transition-all cursor-pointer ${
                     paymentMode === 'CASH'
                       ? 'bg-slate-900 text-white shadow-xs'
                       : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
                   }`}
                 >
-                  <Banknote className="w-4 h-4" />
+                  <Banknote className="w-3.5 h-3.5" />
                   CASH
                 </button>
                 <button
                   type="button"
                   onClick={() => setPaymentMode('UPI')}
-                  className={`py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  className={`py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-1 transition-all cursor-pointer ${
                     paymentMode === 'UPI'
                       ? 'bg-slate-900 text-white shadow-xs'
                       : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
                   }`}
                 >
-                  <QrCode className="w-4 h-4" />
+                  <QrCode className="w-3.5 h-3.5" />
                   UPI
                 </button>
                 <button
                   type="button"
                   onClick={() => setPaymentMode('CARD')}
-                  className={`py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  className={`py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-1 transition-all cursor-pointer ${
                     paymentMode === 'CARD'
                       ? 'bg-slate-900 text-white shadow-xs'
                       : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
                   }`}
                 >
-                  <CreditCard className="w-4 h-4" />
+                  <CreditCard className="w-3.5 h-3.5" />
                   CARD
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaymentMode('SPLIT');
+                    if (!splitCash && !splitUpi && !splitCard) {
+                      setSplitCash(Math.floor(calculations.grandTotal / 2).toString());
+                      setSplitUpi((calculations.grandTotal - Math.floor(calculations.grandTotal / 2)).toString());
+                    }
+                  }}
+                  className={`py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-1 transition-all cursor-pointer ${
+                    paymentMode === 'SPLIT'
+                      ? 'bg-purple-800 text-white shadow-xs'
+                      : 'bg-white border border-slate-200 text-purple-700 hover:bg-purple-50'
+                  }`}
+                >
+                  <Split className="w-3.5 h-3.5" />
+                  SPLIT
+                </button>
               </div>
+
+              {/* Split Multi-Tender Breakdown */}
+              {paymentMode === 'SPLIT' && (
+                <div className="bg-purple-50/70 border border-purple-200 rounded-lg p-2.5 space-y-2 text-xs mb-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-bold text-purple-900 uppercase tracking-wider">
+                      Split Tender (Cash + UPI / Card)
+                    </span>
+                    <span className={`font-bold px-1.5 py-0.5 rounded text-[10px] ${
+                      splitTotals.isSufficient
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-amber-100 text-amber-800'
+                    }`}>
+                      {splitTotals.isSufficient
+                        ? 'Tender Complete'
+                        : `Short: ₹${splitTotals.remaining.toFixed(2)}`}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Cash (₹)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        placeholder="0.00"
+                        value={splitCash}
+                        onChange={(e) => setSplitCash(e.target.value)}
+                        className="w-full text-right text-xs font-bold px-2 py-1 bg-white border border-purple-200 rounded focus:outline-none focus:ring-1 focus:ring-purple-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-600 block mb-0.5">UPI (₹)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        placeholder="0.00"
+                        value={splitUpi}
+                        onChange={(e) => setSplitUpi(e.target.value)}
+                        className="w-full text-right text-xs font-bold px-2 py-1 bg-white border border-purple-200 rounded focus:outline-none focus:ring-1 focus:ring-purple-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Card (₹)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        placeholder="0.00"
+                        value={splitCard}
+                        onChange={(e) => setSplitCard(e.target.value)}
+                        className="w-full text-right text-xs font-bold px-2 py-1 bg-white border border-purple-200 rounded focus:outline-none focus:ring-1 focus:ring-purple-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px] pt-1 border-t border-purple-200">
+                    <span className="text-slate-600 font-medium">
+                      Tendered: <strong>₹{splitTotals.totalTendered.toFixed(2)}</strong> / {formatCurrency(calculations.grandTotal)}
+                    </span>
+                    {splitTotals.remaining > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const rem = splitTotals.remaining;
+                          const currentUpi = parseFloat(splitUpi) || 0;
+                          setSplitUpi((currentUpi + rem).toString());
+                        }}
+                        className="text-[10px] font-bold text-purple-700 bg-purple-100 hover:bg-purple-200 px-1.5 py-0.5 rounded cursor-pointer"
+                      >
+                        + Add ₹{splitTotals.remaining.toFixed(2)} to UPI
+                      </button>
+                    ) : (
+                      <span className="text-emerald-700 font-bold">✓ Full Amount Covered</span>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Cash Tendered & Change Breakdown */}
               {paymentMode === 'CASH' && (
@@ -1641,6 +1954,119 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
         invoiceNumber="COUNTER"
         onPaymentConfirmed={handleCompleteSale}
       />
+
+      {/* ==================================================== */}
+      {/* MODAL: Parked / Held Bills Queue (P1.1)              */}
+      {/* ==================================================== */}
+      <ParkedBillsModal
+        isOpen={isParkedModalOpen}
+        onClose={() => setIsParkedModalOpen(false)}
+        parkedBills={parkedBills}
+        onResume={handleResumeParkedBill}
+        onDiscard={handleDiscardParkedBill}
+      />
+
+      {/* ==================================================== */}
+      {/* MODAL: Active Cart Conflict Prompt on Resume         */}
+      {/* ==================================================== */}
+      {parkConfirmPrompt && (
+        <Modal
+          isOpen={true}
+          onClose={() => setParkConfirmPrompt(null)}
+          title="Active Cart on Counter"
+          maxWidth="sm"
+        >
+          <div className="space-y-4 text-xs">
+            <p className="text-slate-600">
+              There are currently <strong>{cart.length} item(s)</strong> in the counter cart.
+              How would you like to resume <strong>Hold #{parkConfirmPrompt.token_number}</strong>?
+            </p>
+            <div className="space-y-2 pt-2">
+              <button
+                type="button"
+                onClick={() => handleParkCurrentAndResumeHeld(parkConfirmPrompt)}
+                className="w-full py-2.5 px-3 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg transition text-left flex items-center justify-between"
+              >
+                <span>Hold current cart & restore #{parkConfirmPrompt.token_number}</span>
+                <span className="text-[10px] bg-amber-700 px-2 py-0.5 rounded">Safe</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => executeResumeBill(parkConfirmPrompt)}
+                className="w-full py-2.5 px-3 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-bold rounded-lg transition text-left flex items-center justify-between"
+              >
+                <span>Discard current cart & restore #{parkConfirmPrompt.token_number}</span>
+                <span className="text-[10px] bg-red-200 text-red-800 px-2 py-0.5 rounded">Discard Current</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setParkConfirmPrompt(null)}
+                className="w-full py-2 text-slate-500 hover:text-slate-700 font-medium"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ==================================================== */}
+      {/* MODAL: Expired Product Scan Warning Modal (P3.4)     */}
+      {/* ==================================================== */}
+      {expiredPromptProduct && (
+        <Modal
+          isOpen={true}
+          onClose={() => setExpiredPromptProduct(null)}
+          title="⚠️ Expired Product Alert"
+          maxWidth="sm"
+        >
+          <div className="space-y-4 text-xs">
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-900 space-y-1.5">
+              <div className="font-bold flex items-center gap-1.5 text-rose-800">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>Product has passed expiration date!</span>
+              </div>
+              <p className="text-[11px] leading-relaxed">
+                <strong>"{expiredPromptProduct.name}"</strong> has an expired shelf-life date of{' '}
+                <span className="font-mono font-bold underline">{expiredPromptProduct.expiry_date}</span>.
+              </p>
+              {expiredPromptProduct.batch_number && (
+                <p className="text-[10px] text-rose-700 font-mono">
+                  Batch / Lot Code: {expiredPromptProduct.batch_number}
+                </p>
+              )}
+            </div>
+
+            <p className="text-slate-600 text-[11px] leading-relaxed">
+              Under FSSAI & consumer protection regulations, selling expired food/FMCG items is prohibited.
+              Do you wish to cancel this item or perform an intentional cashier override?
+            </p>
+
+            <div className="space-y-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setExpiredPromptProduct(null)}
+                className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition text-center shadow-xs cursor-pointer"
+              >
+                ✓ Cancel & Return to Shelf (Recommended)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const prod = expiredPromptProduct;
+                  setExpiredPromptProduct(null);
+                  doAddProductToCart(prod);
+                }}
+                className="w-full py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg transition text-center border border-slate-300 cursor-pointer"
+              >
+                Override & Add to Bill Anyway
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 };
+
+
