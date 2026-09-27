@@ -5,6 +5,9 @@ import type {
   CreateProductInput,
   UpdateProductInput,
   ProductFilterParams,
+  BulkImportProductInput,
+  BulkImportOptions,
+  BulkImportSummary,
 } from '../types';
 
 /**
@@ -200,5 +203,131 @@ export const productService = {
         p.name.toLowerCase().includes(q) ||
         (p.barcode && p.barcode.toLowerCase().includes(q))
     );
+  },
+
+  /**
+   * Bulk imports an array of products with optional updating of existing barcodes.
+   */
+  async bulkImportProducts(
+    products: BulkImportProductInput[],
+    options: BulkImportOptions = { update_existing_barcodes: true }
+  ): Promise<BulkImportSummary> {
+    if (isTauriEnvironment()) {
+      return await invoke<BulkImportSummary>('bulk_import_products', { products, options });
+    }
+
+    // In-memory fallback for preview mode
+    let inserted = 0;
+    let updated = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+
+    products.forEach((p, idx) => {
+      const existingIdx = previewProducts.findIndex(
+        (existing) => p.barcode && existing.barcode === p.barcode
+      );
+      if (existingIdx >= 0) {
+        if (options.update_existing_barcodes) {
+          const prev = previewProducts[existingIdx];
+          previewProducts[existingIdx] = {
+            ...prev,
+            name: p.name || prev.name,
+            barcode: p.barcode !== undefined ? p.barcode : prev.barcode,
+            category: p.category || prev.category || 'General',
+            unit: p.unit || prev.unit,
+            purchase_price: p.purchase_price ?? prev.purchase_price,
+            selling_price: p.selling_price ?? prev.selling_price,
+            mrp: p.mrp ?? prev.mrp,
+            gst_rate: p.gst_rate ?? prev.gst_rate,
+            minimum_stock: p.minimum_stock ?? prev.minimum_stock,
+            stock: (prev.stock || 0) + (p.stock || 0),
+            updated_at: new Date().toISOString(),
+          };
+          updated++;
+        } else {
+          skipped++;
+        }
+      } else {
+        previewProducts.push({
+          id: Date.now() + idx,
+          name: p.name,
+          barcode: p.barcode || null,
+          category: p.category || 'General',
+          unit: p.unit || 'Kg',
+          purchase_price: p.purchase_price ?? 0,
+          selling_price: p.selling_price,
+          mrp: p.mrp ?? p.selling_price,
+          gst_rate: p.gst_rate ?? 0,
+          stock: p.stock ?? 0,
+          minimum_stock: p.minimum_stock ?? 0,
+          hsn_code: p.hsn_code || null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+        inserted++;
+      }
+    });
+
+    return { total: products.length, inserted, updated, skipped, errors };
+  },
+
+  /**
+   * Generates a CSV content string of products
+   */
+  exportProductsToCsv(products: Product[]): string {
+    const headers = [
+      'Barcode',
+      'Product Name',
+      'Category',
+      'Unit',
+      'Purchase Price',
+      'Selling Price',
+      'MRP',
+      'GST Rate (%)',
+      'Current Stock',
+      'Minimum Stock',
+      'HSN Code',
+    ];
+    const escape = (val: unknown) => {
+      if (val === null || val === undefined) return '';
+      const s = String(val);
+      if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    };
+
+    const rows = products.map((p) =>
+      [
+        escape(p.barcode || ''),
+        escape(p.name),
+        escape(p.category),
+        escape(p.unit),
+        escape(p.purchase_price.toFixed(2)),
+        escape(p.selling_price.toFixed(2)),
+        escape(p.mrp.toFixed(2)),
+        escape(p.gst_rate),
+        escape(p.stock),
+        escape(p.minimum_stock),
+        escape(p.hsn_code || ''),
+      ].join(',')
+    );
+
+    return [headers.join(','), ...rows].join('\n');
+  },
+
+  /**
+   * Generates a starter CSV template with realistic Indian grocery items
+   */
+  generateSampleCsvTemplate(): string {
+    return [
+      'Barcode,Product Name,Category,Unit,Purchase Price,Selling Price,MRP,GST Rate (%),Current Stock,Minimum Stock,HSN Code',
+      '8901058852220,Tata Salt 1kg,Spices & Salt,Packet,22.00,28.00,30.00,0,50,10,2501',
+      '8901030922881,Aashirvaad Shudh Chakki Atta 5kg,Grains & Flours,Bori / Bag,210.00,245.00,265.00,0,30,5,1101',
+      '8906007280014,Fortune Sunlite Sunflower Oil 1L,Edible Oils & Ghee,Pouch,115.00,135.00,145.00,5,40,8,1507',
+      '8901262010054,Amul Butter 500g,Dairy & Eggs,Box,240.00,275.00,285.00,12,20,5,0405',
+      '8901058850001,Maggi 2-Minute Masala Noodles 70g,Snacks & Biscuits,Packet,11.50,14.00,14.00,12,100,25,1902',
+      ',Loose Chana Dal (Desi),Pulses & Dals,Kg,72.00,85.00,90.00,0,100,20,0713',
+    ].join('\n');
   },
 };

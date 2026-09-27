@@ -57,6 +57,15 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
   // Global Function key handler (F1-F8) for fast shopkeeper navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // When on the billing counter, let BillingPage handle F4 (customer modal) and F6 (hold bill)
+      if (currentTab === 'billing' && (e.key === 'F4' || e.key === 'F6')) {
+        return;
+      }
+      // Prevent accidental browser/webview reload when F5 is pressed
+      if (e.key === 'F5') {
+        e.preventDefault();
+      }
+
       const keyMap: Record<string, NavigationTab> = {
         F1: 'dashboard',
         F2: 'billing',
@@ -76,7 +85,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onTabChange]);
+  }, [onTabChange, currentTab]);
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 select-none">

@@ -18,10 +18,12 @@ pub struct Product {
     pub created_at: String,
     pub updated_at: String,
     pub hsn_code: Option<String>,
+    pub expiry_date: Option<String>,
+    pub batch_number: Option<String>,
 }
 
 /// Input payload for creating a new product
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CreateProductInput {
     pub name: String,
     pub barcode: Option<String>,
@@ -34,10 +36,12 @@ pub struct CreateProductInput {
     pub stock: Option<f64>,
     pub minimum_stock: Option<f64>,
     pub hsn_code: Option<String>,
+    pub expiry_date: Option<String>,
+    pub batch_number: Option<String>,
 }
 
 /// Input payload for updating an existing product
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateProductInput {
     pub id: i64,
     pub name: String,
@@ -51,6 +55,8 @@ pub struct UpdateProductInput {
     pub stock: Option<f64>,
     pub minimum_stock: Option<f64>,
     pub hsn_code: Option<String>,
+    pub expiry_date: Option<String>,
+    pub batch_number: Option<String>,
 }
 
 /// Search and filter parameters for product queries
@@ -60,6 +66,40 @@ pub struct ProductFilterParams {
     pub category: Option<String>,
     pub low_stock_only: Option<bool>,
     pub out_of_stock_only: Option<bool>,
+}
+
+/// Input payload for bulk importing products via CSV / Excel
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BulkImportProductInput {
+    pub name: String,
+    pub barcode: Option<String>,
+    pub category: Option<String>,
+    pub unit: String,
+    pub purchase_price: Option<f64>,
+    pub selling_price: f64,
+    pub mrp: Option<f64>,
+    pub gst_rate: Option<f64>,
+    pub stock: Option<f64>,
+    pub minimum_stock: Option<f64>,
+    pub hsn_code: Option<String>,
+    pub expiry_date: Option<String>,
+    pub batch_number: Option<String>,
+}
+
+/// Options configuring bulk catalog import
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkImportOptions {
+    pub update_existing_barcodes: bool,
+}
+
+/// Summary result of a bulk product import operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkImportSummary {
+    pub total: usize,
+    pub inserted: usize,
+    pub updated: usize,
+    pub skipped: usize,
+    pub errors: Vec<String>,
 }
 
 /// Trims and sanitizes barcode strings, converting empty or whitespace-only inputs to `None`.
@@ -152,6 +192,8 @@ fn map_row_to_product(row: &rusqlite::Row) -> rusqlite::Result<Product> {
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
         hsn_code: row.get(13).ok(),
+        expiry_date: row.get(14).ok(),
+        batch_number: row.get(15).ok(),
     })
 }
 
@@ -160,6 +202,8 @@ pub fn create_product_db(conn: &mut Connection, input: CreateProductInput) -> Re
     let clean_name = input.name.trim().to_string();
     let clean_barcode = sanitize_barcode(input.barcode);
     let clean_hsn = sanitize_barcode(input.hsn_code);
+    let clean_expiry = sanitize_barcode(input.expiry_date);
+    let clean_batch = sanitize_barcode(input.batch_number);
     let clean_category = match input.category {
         Some(c) if !c.trim().is_empty() => c.trim().to_string(),
         _ => "General".to_string(),
@@ -185,8 +229,8 @@ pub fn create_product_db(conn: &mut Connection, input: CreateProductInput) -> Re
 
     conn.execute(
         "INSERT INTO products (
-            name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, hsn_code
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);",
+            name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, hsn_code, expiry_date, batch_number
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);",
         params![
             clean_name,
             clean_barcode,
@@ -199,18 +243,39 @@ pub fn create_product_db(conn: &mut Connection, input: CreateProductInput) -> Re
             stock,
             minimum_stock,
             clean_hsn,
+            clean_expiry,
+            clean_batch,
         ],
     )
     .map_err(map_sqlite_error)?;
 
     let new_id = conn.last_insert_rowid();
+
+    // Record opening stock in ledger if initial stock > 0
+    if stock > 0.0 {
+        let _ = conn.execute(
+            "INSERT INTO stock_movements (
+                product_id, product_name, barcode, unit, movement_type,
+                quantity, stock_before, stock_after, reference_type, reference_id,
+                reason, notes, created_at
+            ) VALUES (?1, ?2, ?3, ?4, 'OPENING_STOCK', ?5, 0.0, ?5, 'INITIAL', 'INITIAL', 'Initial stock on product creation', NULL, datetime('now', 'localtime'));",
+            params![
+                new_id,
+                clean_name,
+                clean_barcode,
+                clean_unit,
+                stock,
+            ],
+        );
+    }
+
     get_product_db(conn, new_id)
 }
 
 /// Fetches a single product by its primary key ID.
 pub fn get_product_db(conn: &Connection, id: i64) -> Result<Product, String> {
     conn.query_row(
-        "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at, hsn_code
+        "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at, hsn_code, expiry_date, batch_number
          FROM products WHERE id = ?1;",
         params![id],
         map_row_to_product,
@@ -225,7 +290,7 @@ pub fn get_products_db(
     conn: &Connection,
     filter: Option<ProductFilterParams>,
 ) -> Result<Vec<Product>, String> {
-    let mut sql = "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at, hsn_code FROM products WHERE 1=1".to_string();
+    let mut sql = "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at, hsn_code, expiry_date, batch_number FROM products WHERE 1=1".to_string();
     let mut param_values: Vec<rusqlite::types::Value> = Vec::new();
 
     if let Some(ref f) = filter {
@@ -233,7 +298,8 @@ pub fn get_products_db(
             let q = query.trim();
             if !q.is_empty() {
                 let search_param = format!("%{}%", q);
-                sql.push_str(" AND (name LIKE ? COLLATE NOCASE OR barcode LIKE ? COLLATE NOCASE OR hsn_code LIKE ? COLLATE NOCASE)");
+                sql.push_str(" AND (name LIKE ? COLLATE NOCASE OR barcode LIKE ? COLLATE NOCASE OR hsn_code LIKE ? COLLATE NOCASE OR batch_number LIKE ? COLLATE NOCASE)");
+                param_values.push(search_param.clone().into());
                 param_values.push(search_param.clone().into());
                 param_values.push(search_param.clone().into());
                 param_values.push(search_param.into());
@@ -311,6 +377,16 @@ pub fn update_product_db(conn: &mut Connection, input: UpdateProductInput) -> Re
         None => current.hsn_code,
     };
 
+    let clean_expiry = match input.expiry_date {
+        Some(e) => sanitize_barcode(Some(e)),
+        None => current.expiry_date,
+    };
+
+    let clean_batch = match input.batch_number {
+        Some(b) => sanitize_barcode(Some(b)),
+        None => current.batch_number,
+    };
+
     conn.execute(
         "UPDATE products SET
             name = ?1,
@@ -324,8 +400,10 @@ pub fn update_product_db(conn: &mut Connection, input: UpdateProductInput) -> Re
             stock = ?9,
             minimum_stock = ?10,
             hsn_code = ?11,
+            expiry_date = ?12,
+            batch_number = ?13,
             updated_at = datetime('now', 'localtime')
-         WHERE id = ?12;",
+         WHERE id = ?14;",
         params![
             clean_name,
             clean_barcode,
@@ -338,6 +416,8 @@ pub fn update_product_db(conn: &mut Connection, input: UpdateProductInput) -> Re
             stock,
             minimum_stock,
             clean_hsn,
+            clean_expiry,
+            clean_batch,
             input.id,
         ],
     )
@@ -349,6 +429,22 @@ pub fn update_product_db(conn: &mut Connection, input: UpdateProductInput) -> Re
 /// Deletes a product by ID.
 /// Returns error if deletion is blocked by SQLite foreign key enforcement (e.g. sales history).
 pub fn delete_product_db(conn: &mut Connection, id: i64) -> Result<bool, String> {
+    // Check if product has sales history
+    let sales_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sale_items WHERE product_id = ?1;",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if sales_count > 0 {
+        return Err("This product cannot be deleted because it has sales history.".to_string());
+    }
+
+    // Clean up stock movements if any (e.g. initial OPENING_STOCK) so unsellable draft product can be deleted
+    let _ = conn.execute("DELETE FROM stock_movements WHERE product_id = ?1;", params![id]);
+
     let rows_affected = conn
         .execute("DELETE FROM products WHERE id = ?1;", params![id])
         .map_err(map_sqlite_error)?;
@@ -360,7 +456,7 @@ pub fn delete_product_db(conn: &mut Connection, id: i64) -> Result<bool, String>
     Ok(true)
 }
 
-/// Dedicated fast search by name, barcode, or HSN code prefix/substring.
+/// Dedicated fast search by name, barcode, HSN, or batch number.
 pub fn search_products_db(conn: &Connection, query: String) -> Result<Vec<Product>, String> {
     let q = query.trim();
     if q.is_empty() {
@@ -370,16 +466,16 @@ pub fn search_products_db(conn: &Connection, query: String) -> Result<Vec<Produc
     let search_param = format!("%{}%", q);
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at, hsn_code
+            "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at, hsn_code, expiry_date, batch_number
              FROM products
-             WHERE name LIKE ?1 COLLATE NOCASE OR barcode LIKE ?2 COLLATE NOCASE OR hsn_code LIKE ?3 COLLATE NOCASE
+             WHERE name LIKE ?1 COLLATE NOCASE OR barcode LIKE ?2 COLLATE NOCASE OR hsn_code LIKE ?3 COLLATE NOCASE OR batch_number LIKE ?4 COLLATE NOCASE
              ORDER BY name COLLATE NOCASE ASC
              LIMIT 50;",
         )
         .map_err(map_sqlite_error)?;
 
     let product_iter = stmt
-        .query_map(params![search_param, search_param, search_param], map_row_to_product)
+        .query_map(params![search_param, search_param, search_param, search_param], map_row_to_product)
         .map_err(map_sqlite_error)?;
 
     let mut products = Vec::new();
@@ -390,6 +486,196 @@ pub fn search_products_db(conn: &Connection, query: String) -> Result<Vec<Produc
     Ok(products)
 }
 
+/// Atomically imports a batch of products from CSV / Excel.
+/// Handles validation, duplicate barcodes (skip or update), and stock ledger tracking.
+pub fn bulk_import_products_db(
+    conn: &mut Connection,
+    products: Vec<BulkImportProductInput>,
+    options: BulkImportOptions,
+) -> Result<BulkImportSummary, String> {
+    let mut inserted = 0;
+    let mut updated = 0;
+    let mut skipped = 0;
+    let mut errors = Vec::new();
+    let total = products.len();
+
+    let tx = conn.transaction().map_err(|e| format!("Failed to start transaction: {}", e))?;
+
+    for (idx, p) in products.into_iter().enumerate() {
+        let row_num = idx + 1;
+        let clean_name = p.name.trim().to_string();
+        if clean_name.is_empty() {
+            errors.push(format!("Row {}: Product name is required and cannot be blank.", row_num));
+            continue;
+        }
+
+        let clean_unit = if p.unit.trim().is_empty() {
+            "PCS".to_string()
+        } else {
+            p.unit.trim().to_string()
+        };
+
+        let purchase_price = p.purchase_price.unwrap_or(0.0).max(0.0);
+        let selling_price = p.selling_price;
+        let mrp = p.mrp.unwrap_or(selling_price);
+        let gst_rate = p.gst_rate.unwrap_or(0.0).clamp(0.0, 100.0);
+        let stock = p.stock.unwrap_or(0.0).max(0.0);
+        let minimum_stock = p.minimum_stock.unwrap_or(0.0).max(0.0);
+        let clean_barcode = sanitize_barcode(p.barcode);
+        let clean_hsn = sanitize_barcode(p.hsn_code);
+        let clean_expiry = sanitize_barcode(p.expiry_date);
+        let clean_batch = sanitize_barcode(p.batch_number);
+        let clean_category = match p.category {
+            Some(c) if !c.trim().is_empty() => c.trim().to_string(),
+            _ => "General".to_string(),
+        };
+
+        if selling_price < 0.0 {
+            errors.push(format!("Row {}: Selling price cannot be negative.", row_num));
+            continue;
+        }
+
+        if mrp > 0.0 && selling_price > mrp {
+            errors.push(format!(
+                "Row {}: Selling price (₹{:.2}) cannot exceed MRP (₹{:.2}) under Legal Metrology rules.",
+                row_num, selling_price, mrp
+            ));
+            continue;
+        }
+
+        // Check if barcode already exists
+        if let Some(ref bc) = clean_barcode {
+            let existing_id: Option<(i64, f64)> = tx
+                .query_row(
+                    "SELECT id, stock FROM products WHERE barcode = ?1;",
+                    params![bc],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| format!("Database error on row {}: {}", row_num, e))?;
+
+            if let Some((prod_id, current_stock)) = existing_id {
+                if options.update_existing_barcodes {
+                    let new_stock = current_stock + stock;
+                    let res = tx.execute(
+                        "UPDATE products SET
+                            name = ?1, category = ?2, unit = ?3, purchase_price = ?4,
+                            selling_price = ?5, mrp = ?6, gst_rate = ?7,
+                            stock = ?8, minimum_stock = ?9, hsn_code = ?10,
+                            expiry_date = ?11, batch_number = ?12,
+                            updated_at = datetime('now', 'localtime')
+                         WHERE id = ?13;",
+                        params![
+                            clean_name,
+                            clean_category,
+                            clean_unit,
+                            purchase_price,
+                            selling_price,
+                            mrp,
+                            gst_rate,
+                            new_stock,
+                            minimum_stock,
+                            clean_hsn,
+                            clean_expiry,
+                            clean_batch,
+                            prod_id,
+                        ],
+                    );
+
+                    match res {
+                        Ok(_) => {
+                            if stock > 0.0 {
+                                let _ = tx.execute(
+                                    "INSERT INTO stock_movements (
+                                        product_id, product_name, barcode, unit, movement_type,
+                                        quantity, stock_before, stock_after, reference_type, reference_id,
+                                        reason, notes, created_at
+                                    ) VALUES (?1, ?2, ?3, ?4, 'MANUAL_ADJUSTMENT', ?5, ?6, ?7, 'BULK_IMPORT', 'CSV', 'Bulk CSV import stock increment', NULL, datetime('now', 'localtime'));",
+                                    params![
+                                        prod_id,
+                                        clean_name,
+                                        clean_barcode,
+                                        clean_unit,
+                                        stock,
+                                        current_stock,
+                                        new_stock,
+                                    ],
+                                );
+                            }
+                            updated += 1;
+                        }
+                        Err(e) => {
+                            errors.push(format!("Row {}: Update failed - {}", row_num, e));
+                        }
+                    }
+                    continue;
+                } else {
+                    skipped += 1;
+                    continue;
+                }
+            }
+        }
+
+        // Insert new product
+        let insert_res = tx.execute(
+            "INSERT INTO products (
+                name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, hsn_code, expiry_date, batch_number
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);",
+            params![
+                clean_name,
+                clean_barcode,
+                clean_category,
+                clean_unit,
+                purchase_price,
+                selling_price,
+                mrp,
+                gst_rate,
+                stock,
+                minimum_stock,
+                clean_hsn,
+                clean_expiry,
+                clean_batch,
+            ],
+        );
+
+        match insert_res {
+            Ok(_) => {
+                let new_id = tx.last_insert_rowid();
+                if stock > 0.0 {
+                    let _ = tx.execute(
+                        "INSERT INTO stock_movements (
+                            product_id, product_name, barcode, unit, movement_type,
+                            quantity, stock_before, stock_after, reference_type, reference_id,
+                            reason, notes, created_at
+                        ) VALUES (?1, ?2, ?3, ?4, 'OPENING_STOCK', ?5, 0.0, ?5, 'INITIAL', 'CSV_IMPORT', 'Opening catalog stock from CSV import', NULL, datetime('now', 'localtime'));",
+                        params![
+                            new_id,
+                            clean_name,
+                            clean_barcode,
+                            clean_unit,
+                            stock,
+                        ],
+                    );
+                }
+                inserted += 1;
+            }
+            Err(e) => {
+                errors.push(format!("Row {}: Insert failed - {}", row_num, e));
+            }
+        }
+    }
+
+    tx.commit().map_err(|e| format!("Failed to commit bulk import transaction: {}", e))?;
+
+    Ok(BulkImportSummary {
+        total,
+        inserted,
+        updated,
+        skipped,
+        errors,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,7 +684,9 @@ mod tests {
         let conn = Connection::open_in_memory().expect("Failed to open in-memory db");
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn.execute_batch(include_str!("../migrations/001_initial_schema.sql")).unwrap();
+        conn.execute_batch(include_str!("../migrations/003_returns_and_stock_ledger.sql")).unwrap();
         conn.execute_batch(include_str!("../migrations/004_hsn_and_gstin.sql")).unwrap();
+        conn.execute_batch(include_str!("../migrations/005_expiry_and_batch.sql")).unwrap();
         conn
     }
 
@@ -417,6 +705,7 @@ mod tests {
             stock: Some(40.0),
             minimum_stock: Some(10.0),
             hsn_code: Some("1006".to_string()),
+            ..Default::default()
         };
 
         let product = create_product_db(&mut conn, input).expect("Failed to create product");
@@ -446,6 +735,7 @@ mod tests {
             stock: None,
             minimum_stock: None,
             hsn_code: None,
+            ..Default::default()
         };
         let err = create_product_db(&mut conn, empty_name_input).unwrap_err();
         assert!(err.contains("Product name is required"));
@@ -462,6 +752,7 @@ mod tests {
             stock: None,
             minimum_stock: None,
             hsn_code: None,
+            ..Default::default()
         };
         let err2 = create_product_db(&mut conn, negative_price_input).unwrap_err();
         assert!(err2.contains("Purchase price must be a valid positive number"));
@@ -482,6 +773,7 @@ mod tests {
             stock: None,
             minimum_stock: None,
             hsn_code: None,
+            ..Default::default()
         };
         create_product_db(&mut conn, item1).unwrap();
 
@@ -497,6 +789,7 @@ mod tests {
             stock: None,
             minimum_stock: None,
             hsn_code: None,
+            ..Default::default()
         };
         let err = create_product_db(&mut conn, item2).unwrap_err();
         assert!(err.contains("already exists"), "Duplicate barcode should be friendly: {}", err);
@@ -517,6 +810,7 @@ mod tests {
             stock: None,
             minimum_stock: None,
             hsn_code: None,
+            ..Default::default()
         };
         let p1 = create_product_db(&mut conn, item1).unwrap();
 
@@ -532,6 +826,7 @@ mod tests {
             stock: None,
             minimum_stock: None,
             hsn_code: None,
+            ..Default::default()
         };
         let p2 = create_product_db(&mut conn, item2).unwrap();
 
@@ -555,6 +850,7 @@ mod tests {
             stock: Some(3.0),
             minimum_stock: Some(5.0), // Low stock
             hsn_code: Some("2501".to_string()),
+            ..Default::default()
         }).unwrap();
 
         create_product_db(&mut conn, CreateProductInput {
@@ -569,6 +865,7 @@ mod tests {
             stock: Some(0.0), // Out of stock
             minimum_stock: Some(10.0),
             hsn_code: Some("1512".to_string()),
+            ..Default::default()
         }).unwrap();
 
         create_product_db(&mut conn, CreateProductInput {
@@ -583,6 +880,7 @@ mod tests {
             stock: Some(25.0), // In stock
             minimum_stock: Some(5.0),
             hsn_code: Some("1101".to_string()),
+            ..Default::default()
         }).unwrap();
 
         // Search by name substring
@@ -632,6 +930,7 @@ mod tests {
             stock: Some(33.0),
             minimum_stock: Some(5.0),
             hsn_code: None,
+            ..Default::default()
         }).unwrap();
 
         // Update name and price without passing stock (None)
@@ -648,6 +947,7 @@ mod tests {
             stock: None, // Stock not specified, must preserve 33.0
             minimum_stock: None,
             hsn_code: Some("1902".to_string()),
+            ..Default::default()
         };
 
         let updated = update_product_db(&mut conn, update_input).unwrap();
@@ -673,6 +973,7 @@ mod tests {
             stock: Some(50.0),
             minimum_stock: Some(10.0),
             hsn_code: None,
+            ..Default::default()
         }).unwrap();
 
         // 1. Delete when not referenced works
@@ -692,6 +993,7 @@ mod tests {
             stock: Some(50.0),
             minimum_stock: Some(10.0),
             hsn_code: None,
+            ..Default::default()
         }).unwrap();
 
         // Create a sale and a sale_item referencing prod2
@@ -728,6 +1030,7 @@ mod tests {
             stock: Some(20.0),
             minimum_stock: Some(5.0),
             hsn_code: None,
+            ..Default::default()
         }).unwrap_err();
 
         assert!(
@@ -736,5 +1039,34 @@ mod tests {
             err
         );
     }
+
+    #[test]
+    fn test_product_expiry_and_batch() {
+        let mut conn = setup_test_db();
+
+        let prod = create_product_db(&mut conn, CreateProductInput {
+            name: "Amul Pasteurised Butter 500g".to_string(),
+            barcode: Some("8901262010053".to_string()),
+            category: Some("Dairy".to_string()),
+            unit: "PCS".to_string(),
+            purchase_price: Some(240.0),
+            selling_price: 275.0,
+            mrp: Some(275.0),
+            gst_rate: Some(12.0),
+            stock: Some(20.0),
+            minimum_stock: Some(5.0),
+            hsn_code: Some("0405".to_string()),
+            expiry_date: Some("2026-10-31".to_string()),
+            batch_number: Some("BATCH-AML-09".to_string()),
+        }).unwrap();
+
+        assert_eq!(prod.expiry_date, Some("2026-10-31".to_string()));
+        assert_eq!(prod.batch_number, Some("BATCH-AML-09".to_string()));
+
+        let fetched = get_product_db(&conn, prod.id).unwrap();
+        assert_eq!(fetched.expiry_date, Some("2026-10-31".to_string()));
+        assert_eq!(fetched.batch_number, Some("BATCH-AML-09".to_string()));
+    }
 }
+
 

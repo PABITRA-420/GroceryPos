@@ -13,6 +13,8 @@ const MIGRATION_002_SQL: &str = include_str!("../migrations/002_sales_indexes.sq
 const MIGRATION_003_SQL: &str = include_str!("../migrations/003_returns_and_stock_ledger.sql");
 /// Embedded migration 004 for HSN code and GSTIN
 const MIGRATION_004_SQL: &str = include_str!("../migrations/004_hsn_and_gstin.sql");
+/// Embedded migration 005 for expiry date and batch number
+const MIGRATION_005_SQL: &str = include_str!("../migrations/005_expiry_and_batch.sql");
 
 /// Strongly-typed status information about the local SQLite database
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +269,37 @@ fn run_migrations(conn: &mut Connection) -> Result<i32, String> {
         log::info!("Migration 004 already applied");
     }
 
+    // Check if migration 005 is already applied
+    let migration_005_applied: bool = conn
+        .query_row(
+            "SELECT count(*) FROM _migrations WHERE version = 5;",
+            [],
+            |row| {
+                let count: i32 = row.get(0)?;
+                Ok(count > 0)
+            },
+        )
+        .map_err(|e| format!("Failed to query migration 005 status: {}", e))?;
+
+    if !migration_005_applied {
+        log::info!("Applying migration 005: expiry date and batch number columns");
+        with_transaction(conn, |tx| {
+            tx.execute_batch(MIGRATION_005_SQL)
+                .map_err(|e| format!("Failed to execute migration 005 schema: {}", e))?;
+
+            tx.execute(
+                "INSERT INTO _migrations (version, name) VALUES (?1, ?2);",
+                params![5, "005_expiry_and_batch"],
+            )
+            .map_err(|e| format!("Failed to record migration 005 in _migrations: {}", e))?;
+
+            Ok(())
+        })?;
+        log::info!("Migration 005 applied successfully");
+    } else {
+        log::info!("Migration 005 already applied");
+    }
+
     // Return total applied migrations count
     let total_applied: i32 = conn
         .query_row("SELECT count(*) FROM _migrations;", [], |row| row.get(0))
@@ -499,7 +532,7 @@ mod tests {
 
         // Run migrations
         let migrations = run_migrations(&mut conn).expect("Failed to run migrations");
-        assert_eq!(migrations, 4, "Migrations 001, 002, 003, and 004 must be applied");
+        assert_eq!(migrations, 5, "Migrations 001, 002, 003, 004, and 005 must be applied");
 
         // Verify tables exist
         let tables: Vec<String> = conn
@@ -545,7 +578,7 @@ mod tests {
 
         // Re-run migrations (simulating next app startup)
         let migrations_second_run = run_migrations(&mut conn).expect("Second migration run failed");
-        assert_eq!(migrations_second_run, 4, "Migration count must remain 4");
+        assert_eq!(migrations_second_run, 5, "Migration count must remain 5");
 
         // Verify customer and product are intact
         let customer_name: String = conn

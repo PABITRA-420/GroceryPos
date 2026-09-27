@@ -8,7 +8,7 @@ pub fn round_currency(val: f64) -> f64 {
 }
 
 /// Input model for each cart line item submitted from the POS counter
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CartItemInput {
     pub product_id: Option<i64>,
     pub product_name: String,
@@ -20,24 +20,36 @@ pub struct CartItemInput {
     pub gst_rate: f64,
     #[serde(default)]
     pub hsn_code: Option<String>,
+    #[serde(default)]
+    pub expiry_date: Option<String>,
+    #[serde(default)]
+    pub batch_number: Option<String>,
 }
 
 /// Input payload to finalize and complete a sale
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CreateSaleInput {
     pub customer_id: Option<i64>,
     pub customer_name: Option<String>,
     pub customer_phone: Option<String>,
     pub items: Vec<CartItemInput>,
     pub discount_amount: f64,
-    pub payment_mode: String, // 'CASH' | 'UPI' | 'CARD' | 'CREDIT'
+    pub payment_mode: String, // 'CASH' | 'UPI' | 'CARD' | 'CREDIT' | 'SPLIT'
     pub notes: Option<String>,
     #[serde(default)]
     pub round_off: Option<f64>,
+    #[serde(default)]
+    pub split_cash: Option<f64>,
+    #[serde(default)]
+    pub split_upi: Option<f64>,
+    #[serde(default)]
+    pub split_card: Option<f64>,
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 /// Itemized sale item record persisted in SQLite `sale_items`
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SaleItemRecord {
     pub id: i64,
     pub sale_id: i64,
@@ -52,6 +64,8 @@ pub struct SaleItemRecord {
     pub tax_amount: f64,
     pub total_price: f64,
     pub hsn_code: Option<String>,
+    pub expiry_date: Option<String>,
+    pub batch_number: Option<String>,
 }
 
 /// Sale header record persisted in SQLite `sales`
@@ -225,6 +239,7 @@ pub fn complete_sale_db(
         "UPI" => "UPI",
         "CARD" => "CARD",
         "CREDIT" => "CREDIT",
+        "SPLIT" => "SPLIT",
         _ => "CASH",
     };
 
@@ -279,6 +294,8 @@ pub fn complete_sale_db(
             stock_before: Option<f64>,
             stock_after: Option<f64>,
             hsn_code: Option<String>,
+            expiry_date: Option<String>,
+            batch_number: Option<String>,
         }
 
         let mut calculated_items: Vec<CalculatedItem> = Vec::with_capacity(input.items.len());
@@ -361,16 +378,16 @@ pub fn complete_sale_db(
                 }
             }
 
-            // Calculations
-            let line_subtotal = round_currency(item.quantity * item.unit_price);
+            // Calculations (GST is Inclusive in item unit price)
+            let line_total = round_currency(item.quantity * item.unit_price);
             let tax_amount = if item.gst_rate > 0.0 {
-                round_currency(line_subtotal * (item.gst_rate / 100.0))
+                let base = line_total / (1.0 + (item.gst_rate / 100.0));
+                round_currency(line_total - base)
             } else {
                 0.0
             };
-            let line_total = round_currency(line_subtotal + tax_amount);
 
-            subtotal += line_subtotal;
+            subtotal += line_total;
             total_tax += tax_amount;
 
             let hsn_code = match &item.hsn_code {
@@ -379,6 +396,38 @@ pub fn complete_sale_db(
                     if let Some(pid) = item.product_id {
                         tx.query_row(
                             "SELECT hsn_code FROM products WHERE id = ?1;",
+                            params![pid],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(None)
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            let expiry_date = match &item.expiry_date {
+                Some(e) if !e.trim().is_empty() => Some(e.trim().to_string()),
+                _ => {
+                    if let Some(pid) = item.product_id {
+                        tx.query_row(
+                            "SELECT expiry_date FROM products WHERE id = ?1;",
+                            params![pid],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(None)
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            let batch_number = match &item.batch_number {
+                Some(b) if !b.trim().is_empty() => Some(b.trim().to_string()),
+                _ => {
+                    if let Some(pid) = item.product_id {
+                        tx.query_row(
+                            "SELECT batch_number FROM products WHERE id = ?1;",
                             params![pid],
                             |r| r.get(0),
                         )
@@ -407,6 +456,8 @@ pub fn complete_sale_db(
                 stock_before,
                 stock_after,
                 hsn_code,
+                expiry_date,
+                batch_number,
             });
         }
 
@@ -420,7 +471,7 @@ pub fn complete_sale_db(
             ));
         }
 
-        let mut total_amount = round_currency(subtotal - input.discount_amount + total_tax);
+        let mut total_amount = round_currency(subtotal - input.discount_amount);
         if let Some(ro) = input.round_off {
             if ro.abs() <= 1.0 {
                 total_amount = round_currency(total_amount + ro);
@@ -434,12 +485,37 @@ pub fn complete_sale_db(
         let invoice_number = generate_invoice_number(tx)?;
 
         // 5. Insert sales record
+        let payment_status = if payment_mode == "CREDIT" {
+            "PENDING"
+        } else {
+            "PAID"
+        };
+
+        let mut final_notes = input.notes.as_deref().map(|n| n.trim().to_string());
+        if payment_mode == "SPLIT" {
+            let sc = input.split_cash.unwrap_or(0.0);
+            let su = input.split_upi.unwrap_or(0.0);
+            let scard = input.split_card.unwrap_or(0.0);
+            let split_tag = format!("[SPLIT: Cash ₹{:.2}, UPI ₹{:.2}, Card ₹{:.2}]", sc, su, scard);
+            final_notes = match final_notes {
+                Some(n) if !n.is_empty() => Some(format!("{} | {}", n, split_tag)),
+                _ => Some(split_tag),
+            };
+        }
+
+        let created_at_sql: String = match &input.created_at {
+            Some(ts) if !ts.trim().is_empty() => ts.trim().to_string(),
+            _ => tx
+                .query_row("SELECT datetime('now', 'localtime');", [], |r| r.get(0))
+                .unwrap_or_else(|_| "1970-01-01 00:00:00".to_string()),
+        };
+
         tx.execute(
             "INSERT INTO sales (
                 invoice_number, customer_id, customer_name, customer_phone,
                 subtotal, discount_amount, tax_amount, total_amount,
                 payment_mode, payment_status, notes, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'PAID', ?10, datetime('now', 'localtime'));",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);",
             params![
                 invoice_number,
                 input.customer_id,
@@ -450,7 +526,9 @@ pub fn complete_sale_db(
                 total_tax,
                 total_amount,
                 payment_mode,
-                input.notes.as_deref().map(|n| n.trim()),
+                payment_status,
+                final_notes,
+                created_at_sql,
             ],
         )
         .map_err(|e| format!("Failed to insert sale record: {}", e))?;
@@ -464,8 +542,8 @@ pub fn complete_sale_db(
             tx.execute(
                 "INSERT INTO sale_items (
                     sale_id, product_id, product_name, barcode, unit,
-                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price, hsn_code
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);",
+                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price, hsn_code, expiry_date, batch_number
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);",
                 params![
                     sale_id,
                     c_item.product_id,
@@ -479,6 +557,8 @@ pub fn complete_sale_db(
                     c_item.tax_amount,
                     c_item.total_price,
                     c_item.hsn_code,
+                    c_item.expiry_date,
+                    c_item.batch_number,
                 ],
             )
             .map_err(|e| format!("Failed to insert sale item: {}", e))?;
@@ -518,6 +598,8 @@ pub fn complete_sale_db(
                 tax_amount: c_item.tax_amount,
                 total_price: c_item.total_price,
                 hsn_code: c_item.hsn_code,
+                expiry_date: c_item.expiry_date,
+                batch_number: c_item.batch_number,
             });
         }
 
@@ -602,7 +684,8 @@ pub fn get_sale_by_invoice_db(
     let mut stmt = conn
         .prepare(
             "SELECT id, sale_id, product_id, product_name, barcode, unit,
-                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price, hsn_code
+                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price, hsn_code,
+                    expiry_date, batch_number
              FROM sale_items WHERE sale_id = ?1 ORDER BY id ASC;",
         )
         .map_err(|e| format!("Failed to prepare sale items query: {}", e))?;
@@ -623,6 +706,8 @@ pub fn get_sale_by_invoice_db(
                 tax_amount: row.get(10)?,
                 total_price: row.get(11)?,
                 hsn_code: row.get(12).ok(),
+                expiry_date: row.get(13).ok(),
+                batch_number: row.get(14).ok(),
             })
         })
         .map_err(|e| format!("Failed to query sale items: {}", e))?;
@@ -733,7 +818,8 @@ pub fn get_sale_by_id_db(conn: &Connection, id: i64) -> Result<SaleResult, Strin
     let mut stmt = conn
         .prepare(
             "SELECT id, sale_id, product_id, product_name, barcode, unit,
-                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price, hsn_code
+                    quantity, unit_price, mrp, gst_rate, tax_amount, total_price, hsn_code,
+                    expiry_date, batch_number
              FROM sale_items WHERE sale_id = ?1 ORDER BY id ASC;",
         )
         .map_err(|e| format!("Failed to prepare sale items query: {}", e))?;
@@ -754,6 +840,8 @@ pub fn get_sale_by_id_db(conn: &Connection, id: i64) -> Result<SaleResult, Strin
                 tax_amount: row.get(10)?,
                 total_price: row.get(11)?,
                 hsn_code: row.get(12).ok(),
+                expiry_date: row.get(13).ok(),
+                batch_number: row.get(14).ok(),
             })
         })
         .map_err(|e| format!("Failed to query sale items: {}", e))?;
@@ -1025,6 +1113,81 @@ pub struct BusinessReportResult {
     pub customers: Vec<CustomerSpendItem>,
     pub top_products: Vec<TopSellingProductItem>,
     pub sales: Vec<SaleListItem>,
+}
+
+/// GSTR-1 Table 4: B2B Invoices (Sales to GST Registered Customers)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Gstr1B2bItem {
+    pub gstin: String,
+    pub customer_name: String,
+    pub invoice_number: String,
+    pub invoice_date: String,
+    pub invoice_value: f64,
+    pub place_of_supply: String,
+    pub reverse_charge: String,
+    pub applicable_tax_rate: f64,
+    pub taxable_value: f64,
+    pub central_tax: f64,
+    pub state_tax: f64,
+}
+
+/// GSTR-1 Table 7: B2C (Small) Invoices (Sales to Unregistered Customers grouped by Tax Rate)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Gstr1B2cItem {
+    pub tax_rate: f64,
+    pub taxable_value: f64,
+    pub central_tax: f64,
+    pub state_tax: f64,
+    pub invoice_count: i64,
+    pub total_value: f64,
+}
+
+/// GSTR-1 Table 12: HSN-wise Summary of Outward Supplies
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Gstr1HsnItem {
+    pub hsn_code: String,
+    pub description: String,
+    pub uqc: String,
+    pub total_quantity: f64,
+    pub total_value: f64,
+    pub taxable_value: f64,
+    pub central_tax: f64,
+    pub state_tax: f64,
+}
+
+/// Full GSTR-1 Tax Report Result Envelope
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Gstr1ReportResult {
+    pub period_label: String,
+    pub shop_gstin: Option<String>,
+    pub shop_name: String,
+    pub total_b2b_invoices: usize,
+    pub total_b2b_taxable: f64,
+    pub total_b2b_tax: f64,
+    pub total_b2c_invoices: usize,
+    pub total_b2c_taxable: f64,
+    pub total_b2c_tax: f64,
+    pub b2b_table4: Vec<Gstr1B2bItem>,
+    pub b2c_table7: Vec<Gstr1B2cItem>,
+    pub hsn_table12: Vec<Gstr1HsnItem>,
+}
+
+/// Day-End Cash Drawer Reconciliation (Z-Report / Shift Close)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DayEndSummaryResult {
+    pub report_date: String,
+    pub generated_at: String,
+    pub shop_name: String,
+    pub total_invoices: i64,
+    pub total_sales_revenue: f64,
+    pub cash_sales: f64,
+    pub upi_sales: f64,
+    pub card_sales: f64,
+    pub split_sales: f64,
+    pub total_returns_count: i64,
+    pub total_refund_amount: f64,
+    pub cash_refund_amount: f64,
+    pub net_cash_inflow: f64,
 }
 
 /// Retrieves comprehensive business performance, customer spend, top products,
@@ -1356,6 +1519,331 @@ pub fn get_business_report_db(
     })
 }
 
+/// Retrieves official GSTR-1 compliant tax data broken down into:
+/// - Table 4: B2B Supplies to GST Registered merchants
+/// - Table 7: B2C Small Supplies to unregistered retail consumers
+/// - Table 12: HSN-wise summary of outward supplies
+pub fn get_gstr1_report_db(
+    conn: &Connection,
+    filter: BusinessReportFilter,
+) -> Result<Gstr1ReportResult, String> {
+    let mut where_clauses: Vec<String> = Vec::new();
+    let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+    let preset = filter.date_preset.as_deref().map(str::trim).unwrap_or("this_month");
+
+    let period_label = match preset.to_lowercase().as_str() {
+        "today" => {
+            where_clauses.push("date(s.created_at) = date('now', 'localtime')".to_string());
+            "Today".to_string()
+        }
+        "yesterday" => {
+            where_clauses.push("date(s.created_at) = date('now', 'localtime', '-1 day')".to_string());
+            "Yesterday".to_string()
+        }
+        "this_month" => {
+            where_clauses.push("strftime('%Y-%m', s.created_at) = strftime('%Y-%m', 'now', 'localtime')".to_string());
+            "This Month".to_string()
+        }
+        "last_month" => {
+            where_clauses.push("strftime('%Y-%m', s.created_at) = strftime('%Y-%m', 'now', 'localtime', 'start of month', '-1 day')".to_string());
+            "Last Month".to_string()
+        }
+        "this_year" => {
+            where_clauses.push("strftime('%Y', s.created_at) = strftime('%Y', 'now', 'localtime')".to_string());
+            "This Financial Year".to_string()
+        }
+        "custom" => {
+            let has_start = filter.start_date.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let has_end = filter.end_date.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+            if let Some(s_date) = has_start {
+                if !is_valid_iso_date(s_date) {
+                    return Err(format!("Invalid start date '{}'. Format: YYYY-MM-DD", s_date));
+                }
+                where_clauses.push("date(s.created_at) >= date(?)".to_string());
+                params_vec.push(s_date.to_string().into());
+            }
+
+            if let Some(e_date) = has_end {
+                if !is_valid_iso_date(e_date) {
+                    return Err(format!("Invalid end date '{}'. Format: YYYY-MM-DD", e_date));
+                }
+                where_clauses.push("date(s.created_at) <= date(?)".to_string());
+                params_vec.push(e_date.to_string().into());
+            }
+
+            match (has_start, has_end) {
+                (Some(s), Some(e)) => format!("{} to {}", s, e),
+                (Some(s), None) => format!("From {}", s),
+                (None, Some(e)) => format!("Until {}", e),
+                (None, None) => "Custom Range".to_string(),
+            }
+        }
+        "all" | _ => "All Time".to_string(),
+    };
+
+    let sales_where = if where_clauses.is_empty() {
+        "1=1".to_string()
+    } else {
+        where_clauses.join(" AND ")
+    };
+
+    let query_params: Vec<&dyn rusqlite::ToSql> = params_vec
+        .iter()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
+
+    let shop_name: String = conn
+        .query_row("SELECT value FROM settings WHERE key = 'shop_name';", [], |r| r.get(0))
+        .unwrap_or_else(|_| "Apna Grocery Store".to_string());
+    let shop_gstin: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = 'shop_gstin';", [], |r| r.get(0))
+        .ok();
+
+    // 2. Table 4: B2B Invoices (Customers with GSTIN)
+    let b2b_sql = format!(
+        "SELECT
+            c.gstin,
+            c.name,
+            s.invoice_number,
+            date(s.created_at) as inv_date,
+            s.total_amount,
+            COALESCE(c.address, 'Local State'),
+            si.gst_rate,
+            SUM(si.total_price - si.tax_amount) as taxable_val,
+            SUM(si.tax_amount / 2.0) as cgst,
+            SUM(si.tax_amount / 2.0) as sgst
+         FROM sales s
+         JOIN sale_items si ON si.sale_id = s.id
+         JOIN customers c ON c.id = s.customer_id
+         WHERE {} AND c.gstin IS NOT NULL AND trim(c.gstin) != ''
+         GROUP BY s.id, si.gst_rate
+         ORDER BY s.id ASC;",
+        sales_where
+    );
+
+    let mut b2b_stmt = conn.prepare(&b2b_sql).map_err(|e| format!("Failed to prepare B2B query: {}", e))?;
+    let b2b_rows = b2b_stmt.query_map(&query_params[..], |row| {
+        Ok(Gstr1B2bItem {
+            gstin: row.get(0)?,
+            customer_name: row.get(1)?,
+            invoice_number: row.get(2)?,
+            invoice_date: row.get(3)?,
+            invoice_value: row.get(4)?,
+            place_of_supply: row.get(5)?,
+            reverse_charge: "N".to_string(),
+            applicable_tax_rate: row.get(6)?,
+            taxable_value: row.get(7)?,
+            central_tax: row.get(8)?,
+            state_tax: row.get(9)?,
+        })
+    }).map_err(|e| format!("Failed to query B2B items: {}", e))?;
+
+    let mut b2b_table4 = Vec::new();
+    let mut total_b2b_taxable = 0.0;
+    let mut total_b2b_tax = 0.0;
+    for item in b2b_rows {
+        let b = item.map_err(|e| format!("Failed to read B2B row: {}", e))?;
+        total_b2b_taxable += b.taxable_value;
+        total_b2b_tax += b.central_tax + b.state_tax;
+        b2b_table4.push(b);
+    }
+
+    // 3. Table 7: B2C (Small) Invoices (Customers without GSTIN, grouped by tax rate)
+    let b2c_sql = format!(
+        "SELECT
+            si.gst_rate,
+            COALESCE(SUM(si.total_price - si.tax_amount), 0.0) as taxable_val,
+            COALESCE(SUM(si.tax_amount / 2.0), 0.0) as cgst,
+            COALESCE(SUM(si.tax_amount / 2.0), 0.0) as sgst,
+            COUNT(DISTINCT s.id) as inv_count,
+            COALESCE(SUM(si.total_price), 0.0) as total_val
+         FROM sales s
+         JOIN sale_items si ON si.sale_id = s.id
+         LEFT JOIN customers c ON c.id = s.customer_id
+         WHERE {} AND (c.gstin IS NULL OR trim(c.gstin) = '')
+         GROUP BY si.gst_rate
+         ORDER BY si.gst_rate ASC;",
+        sales_where
+    );
+
+    let mut b2c_stmt = conn.prepare(&b2c_sql).map_err(|e| format!("Failed to prepare B2C query: {}", e))?;
+    let b2c_rows = b2c_stmt.query_map(&query_params[..], |row| {
+        Ok(Gstr1B2cItem {
+            tax_rate: row.get(0)?,
+            taxable_value: row.get(1)?,
+            central_tax: row.get(2)?,
+            state_tax: row.get(3)?,
+            invoice_count: row.get(4)?,
+            total_value: row.get(5)?,
+        })
+    }).map_err(|e| format!("Failed to query B2C items: {}", e))?;
+
+    let mut b2c_table7 = Vec::new();
+    let mut total_b2c_taxable = 0.0;
+    let mut total_b2c_tax = 0.0;
+    let mut total_b2c_invoices = 0;
+    for item in b2c_rows {
+        let b = item.map_err(|e| format!("Failed to read B2C row: {}", e))?;
+        total_b2c_taxable += b.taxable_value;
+        total_b2c_tax += b.central_tax + b.state_tax;
+        total_b2c_invoices += b.invoice_count as usize;
+        b2c_table7.push(b);
+    }
+
+    // 4. Table 12: HSN Summary of Outward Supplies
+    let hsn_sql = format!(
+        "SELECT
+            COALESCE(NULLIF(trim(si.hsn_code), ''), '0000') as hsn,
+            si.product_name,
+            COALESCE(NULLIF(trim(si.unit), ''), 'PCS') as uqc,
+            SUM(si.quantity) as total_qty,
+            SUM(si.total_price) as total_val,
+            SUM(si.total_price - si.tax_amount) as taxable_val,
+            SUM(si.tax_amount / 2.0) as cgst,
+            SUM(si.tax_amount / 2.0) as sgst
+         FROM sales s
+         JOIN sale_items si ON si.sale_id = s.id
+         WHERE {}
+         GROUP BY hsn, si.product_name, uqc
+         ORDER BY hsn ASC, si.product_name ASC;",
+        sales_where
+    );
+
+    let mut hsn_stmt = conn.prepare(&hsn_sql).map_err(|e| format!("Failed to prepare HSN query: {}", e))?;
+    let hsn_rows = hsn_stmt.query_map(&query_params[..], |row| {
+        Ok(Gstr1HsnItem {
+            hsn_code: row.get(0)?,
+            description: row.get(1)?,
+            uqc: row.get(2)?,
+            total_quantity: row.get(3)?,
+            total_value: row.get(4)?,
+            taxable_value: row.get(5)?,
+            central_tax: row.get(6)?,
+            state_tax: row.get(7)?,
+        })
+    }).map_err(|e| format!("Failed to query HSN items: {}", e))?;
+
+    let mut hsn_table12 = Vec::new();
+    for item in hsn_rows {
+        hsn_table12.push(item.map_err(|e| format!("Failed to read HSN row: {}", e))?);
+    }
+
+    Ok(Gstr1ReportResult {
+        period_label,
+        shop_gstin,
+        shop_name,
+        total_b2b_invoices: b2b_table4.len(),
+        total_b2b_taxable,
+        total_b2b_tax,
+        total_b2c_invoices,
+        total_b2c_taxable,
+        total_b2c_tax,
+        b2b_table4,
+        b2c_table7,
+        hsn_table12,
+    })
+}
+
+/// Day-End Cash Drawer Reconciliation (Z-Report / Shift Close)
+/// Computes total cash tender inflow, returns outflow, UPI/card breakdown, and expected drawer balance.
+pub fn get_day_end_summary_db(
+    conn: &Connection,
+    target_date: Option<String>,
+) -> Result<DayEndSummaryResult, String> {
+    let date_str = match target_date {
+        Some(ref d) if !d.trim().is_empty() => {
+            if !is_valid_iso_date(d.trim()) {
+                return Err(format!("Invalid target date '{}'. Format: YYYY-MM-DD", d));
+            }
+            d.trim().to_string()
+        }
+        _ => {
+            conn.query_row("SELECT date('now', 'localtime');", [], |r| r.get(0))
+                .unwrap_or_else(|_| "2026-09-26".to_string())
+        }
+    };
+
+    let shop_name: String = conn
+        .query_row("SELECT value FROM settings WHERE key = 'shop_name';", [], |r| r.get(0))
+        .unwrap_or_else(|_| "Apna Grocery Store".to_string());
+
+    let (total_invoices, total_sales_revenue, cash_sales, upi_sales, card_sales, split_sales): (i64, f64, f64, f64, f64, f64) = conn
+        .query_row(
+            "SELECT
+                COUNT(id),
+                COALESCE(SUM(total_amount), 0.0),
+                COALESCE(SUM(CASE WHEN UPPER(payment_mode) = 'CASH' THEN total_amount ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN UPPER(payment_mode) = 'UPI' THEN total_amount ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN UPPER(payment_mode) = 'CARD' THEN total_amount ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN UPPER(payment_mode) = 'SPLIT' THEN total_amount ELSE 0.0 END), 0.0)
+             FROM sales
+             WHERE date(created_at) = date(?1);",
+            params![date_str],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
+        .unwrap_or((0, 0.0, 0.0, 0.0, 0.0, 0.0));
+
+    // Also calculate any split tender cash recorded in sales notes (e.g. "Cash: ₹X.XX")
+    let mut additional_split_cash = 0.0;
+    if split_sales > 0.0 {
+        if let Ok(mut split_stmt) = conn.prepare(
+            "SELECT notes FROM sales WHERE date(created_at) = date(?1) AND UPPER(payment_mode) = 'SPLIT';"
+        ) {
+            if let Ok(rows) = split_stmt.query_map(params![date_str], |r| r.get::<_, Option<String>>(0)) {
+                for note_opt in rows.flatten() {
+                    if let Some(note) = note_opt {
+                        if let Some(pos) = note.find("Cash: ₹") {
+                            let sub = &note[pos + 9..];
+                            let end = sub.find(',').or_else(|| sub.find(' ')).unwrap_or(sub.len());
+                            if let Ok(val) = sub[..end].trim().parse::<f64>() {
+                                additional_split_cash += val;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let final_cash_sales = cash_sales + additional_split_cash;
+
+    // Returns / Refunds for the day
+    let (total_returns_count, total_refund_amount, cash_refund_amount): (i64, f64, f64) = conn
+        .query_row(
+            "SELECT
+                COUNT(id),
+                COALESCE(SUM(total_refund), 0.0),
+                COALESCE(SUM(CASE WHEN UPPER(refund_mode) = 'CASH' THEN total_refund ELSE 0.0 END), 0.0)
+             FROM sales_returns
+             WHERE date(created_at) = date(?1);",
+            params![date_str],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap_or((0, 0.0, 0.0));
+
+    let net_cash_inflow = final_cash_sales - cash_refund_amount;
+    let generated_at: String = conn
+        .query_row("SELECT datetime('now', 'localtime');", [], |r| r.get(0))
+        .unwrap_or_else(|_| date_str.clone());
+
+    Ok(DayEndSummaryResult {
+        report_date: date_str,
+        generated_at,
+        shop_name,
+        total_invoices,
+        total_sales_revenue,
+        cash_sales: final_cash_sales,
+        upi_sales,
+        card_sales,
+        split_sales,
+        total_returns_count,
+        total_refund_amount,
+        cash_refund_amount,
+        net_cash_inflow,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1371,6 +1859,8 @@ mod tests {
             .expect("Failed to run schema migration 003");
         conn.execute_batch(include_str!("../migrations/004_hsn_and_gstin.sql"))
             .expect("Failed to run schema migration 004");
+        conn.execute_batch(include_str!("../migrations/005_expiry_and_batch.sql"))
+            .expect("Failed to run schema migration 005");
         conn
     }
 
@@ -1400,11 +1890,13 @@ mod tests {
                 mrp: 30.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         };
 
         let result = complete_sale_db(&mut conn, input).expect("Sale must complete successfully");
@@ -1460,6 +1952,7 @@ mod tests {
                     mrp: 50.0,
                     gst_rate: 0.0,
                     hsn_code: Some("1006".to_string()),
+                    ..Default::default()
                 },
                 CartItemInput {
                     product_id: Some(2),
@@ -1471,12 +1964,14 @@ mod tests {
                     mrp: 120.0,
                     gst_rate: 18.0,
                     hsn_code: Some("3305".to_string()),
+                    ..Default::default()
                 },
             ],
             discount_amount: 10.0,
             payment_mode: "UPI".to_string(),
             notes: Some("UPI Ref: 123456789".to_string()),
             round_off: None,
+            ..Default::default()
         };
 
         let result = complete_sale_db(&mut conn, input).expect("Customer sale must succeed");
@@ -1486,8 +1981,9 @@ mod tests {
         assert_eq!(result.sale.customer_phone, Some("9876543210".to_string()));
         assert_eq!(result.sale.subtotal, 200.0);
         assert_eq!(result.sale.discount_amount, 10.0);
-        assert_eq!(result.sale.tax_amount, 18.0);
-        assert_eq!(result.sale.total_amount, 208.0); // 200 - 10 + 18
+        // Shampoo (₹100 incl. 18% GST): tax = 100 - (100 / 1.18) = 15.25
+        assert_eq!(result.sale.tax_amount, 15.25);
+        assert_eq!(result.sale.total_amount, 190.0); // 200 - 10 (Inclusive GST)
         assert_eq!(result.sale.payment_mode, "UPI");
 
         // Verify query by invoice
@@ -1523,11 +2019,13 @@ mod tests {
                 mrp: 55.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         };
 
         let err = complete_sale_db(&mut conn, input).expect_err("Must fail due to insufficient stock");
@@ -1570,11 +2068,13 @@ mod tests {
                 mrp: 100.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         };
 
         let err = complete_sale_db(&mut conn, input).expect_err("Must fail for missing product");
@@ -1606,11 +2106,13 @@ mod tests {
                 mrp: 10.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 50.0, // Exceeds 10.0
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         };
 
         let err = complete_sale_db(&mut conn, input).expect_err("Must reject discount exceeding subtotal");
@@ -1643,11 +2145,13 @@ mod tests {
                     mrp: 10.0,
                     gst_rate: 0.0,
                     hsn_code: None,
+                    ..Default::default()
                 }],
                 discount_amount: 0.0,
                 payment_mode: "CASH".to_string(),
                 notes: None,
                 round_off: None,
+            ..Default::default()
             };
 
             let res = complete_sale_db(&mut conn, input).unwrap();
@@ -1687,11 +2191,13 @@ mod tests {
                 mrp: 250.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: Some(0.25), // 246.75 + 0.25 = 247.00
+            ..Default::default()
         };
 
         let res = complete_sale_db(&mut conn, input).unwrap();
@@ -1729,11 +2235,13 @@ mod tests {
                 mrp: 45.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         };
 
         let res = complete_sale_db(&mut conn, input).unwrap();
@@ -1768,11 +2276,13 @@ mod tests {
                     mrp: 40.0,
                     gst_rate: 0.0,
                     hsn_code: None,
+                    ..Default::default()
                 }],
                 discount_amount: 0.0,
                 payment_mode: "CASH".to_string(),
                 notes: None,
                 round_off: None,
+            ..Default::default()
             };
             complete_sale_db(&mut conn, input).unwrap();
         }
@@ -1854,11 +2364,13 @@ mod tests {
                 mrp: 100.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         // Sale 2: Rajesh with phone
@@ -1876,11 +2388,13 @@ mod tests {
                 mrp: 100.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "UPI".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         // Sale 3: Priya with phone
@@ -1898,11 +2412,13 @@ mod tests {
                 mrp: 100.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CARD".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         // 1. Search by invoice number
@@ -1971,11 +2487,13 @@ mod tests {
                 mrp: 30.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         // 2 UPI sales
@@ -1994,11 +2512,13 @@ mod tests {
                     mrp: 30.0,
                     gst_rate: 0.0,
                     hsn_code: None,
+                    ..Default::default()
                 }],
                 discount_amount: 0.0,
                 payment_mode: "UPI".to_string(),
                 notes: None,
                 round_off: None,
+            ..Default::default()
             }).unwrap();
         }
 
@@ -2047,11 +2567,13 @@ mod tests {
                 mrp: 40.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         // 1. "today" preset should include today's sale
@@ -2121,11 +2643,13 @@ mod tests {
                 mrp: 25.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: Some("Original Sale Note".to_string()),
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         let inv_no = sale_res.sale.invoice_number.clone();
@@ -2201,11 +2725,13 @@ mod tests {
                 mrp: 20.0,
                 gst_rate: 0.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap();
 
         let fetched = get_sale_by_id_db(&conn, sale.sale.id).unwrap();
@@ -2241,11 +2767,13 @@ mod tests {
                 mrp: 150.0,
                 gst_rate: 5.0,
                 hsn_code: None,
+                ..Default::default()
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
             notes: None,
             round_off: None,
+            ..Default::default()
         }).unwrap_err();
 
         assert!(
@@ -2294,6 +2822,7 @@ mod tests {
                     mrp: 100.0,
                     gst_rate: 5.0,
                     hsn_code: Some("1006".to_string()),
+                    ..Default::default()
                 },
                 CartItemInput {
                     product_id: Some(2),
@@ -2305,12 +2834,14 @@ mod tests {
                     mrp: 85.0,
                     gst_rate: 0.0,
                     hsn_code: Some("0713".to_string()),
+                    ..Default::default()
                 },
             ],
             discount_amount: 10.0,
             payment_mode: "UPI".to_string(),
             notes: Some("Diwali Order".to_string()),
             round_off: None,
+            ..Default::default()
         };
 
         let result = complete_sale_db(&mut conn, sale_input).expect("Sale must succeed");
@@ -2325,19 +2856,19 @@ mod tests {
 
         assert_eq!(report.summary.total_invoices, 1);
         assert_eq!(report.summary.total_items_sold, 3.0);
-        // Revenue: subtotal 270 - 10 discount + 9.5 tax = 269.5
-        assert_eq!(report.summary.total_sales_revenue, 269.5);
+        // Revenue: subtotal 270 - 10 discount = 260.0 (Inclusive GST)
+        assert_eq!(report.summary.total_sales_revenue, 260.0);
         // Cost: 2 * 70 + 1 * 60 = 200.0
         assert_eq!(report.summary.total_purchase_cost, 200.0);
-        // Profit: 269.5 - 200 = 69.5
-        assert_eq!(report.summary.gross_profit, 69.5);
-        assert_eq!(report.summary.payment_upi, 269.5);
+        // Profit: 260.0 - 200 = 60.0
+        assert_eq!(report.summary.gross_profit, 60.0);
+        assert_eq!(report.summary.payment_upi, 260.0);
         assert_eq!(report.summary.payment_cash, 0.0);
 
         // Check customer spend
         assert_eq!(report.customers.len(), 1);
         assert_eq!(report.customers[0].name, "Ramesh Gupta");
-        assert_eq!(report.customers[0].total_spent_on_buying, 269.5);
+        assert_eq!(report.customers[0].total_spent_on_buying, 260.0);
         assert_eq!(report.customers[0].total_purchase_cost_to_store, 200.0);
 
         // Check top products
@@ -2349,5 +2880,75 @@ mod tests {
         assert_eq!(report.sales.len(), 1);
         assert_eq!(report.sales[0].payment_mode, "UPI");
     }
+
+    #[test]
+    fn test_sale_records_expiry_and_batch() {
+        let mut conn = setup_test_db();
+
+        // Insert product with batch and expiry
+        conn.execute(
+            "INSERT INTO products (id, name, selling_price, mrp, gst_rate, stock, unit, expiry_date, batch_number)
+             VALUES (1, 'Organic Milk 500ml', 40.0, 40.0, 0.0, 20.0, 'PKT', '2026-10-15', 'BATCH-OM-99');",
+            [],
+        )
+        .unwrap();
+
+        // 1. Sale with product_id where cashier did not specify batch/expiry -> should snapshot from product master!
+        let sale1 = complete_sale_db(&mut conn, CreateSaleInput {
+            customer_id: None,
+            customer_name: None,
+            customer_phone: None,
+            items: vec![CartItemInput {
+                product_id: Some(1),
+                product_name: "Organic Milk 500ml".to_string(),
+                barcode: None,
+                unit: "PKT".to_string(),
+                quantity: 1.0,
+                unit_price: 40.0,
+                mrp: 40.0,
+                gst_rate: 0.0,
+                hsn_code: None,
+                expiry_date: None,
+                batch_number: None,
+            }],
+            discount_amount: 0.0,
+            payment_mode: "CASH".to_string(),
+            notes: None,
+            round_off: None,
+            ..Default::default()
+        }).unwrap();
+
+        assert_eq!(sale1.items[0].expiry_date, Some("2026-10-15".to_string()));
+        assert_eq!(sale1.items[0].batch_number, Some("BATCH-OM-99".to_string()));
+
+        // 2. Sale where cashier explicitly specifies a batch
+        let sale2 = complete_sale_db(&mut conn, CreateSaleInput {
+            customer_id: None,
+            customer_name: None,
+            customer_phone: None,
+            items: vec![CartItemInput {
+                product_id: Some(1),
+                product_name: "Organic Milk 500ml".to_string(),
+                barcode: None,
+                unit: "PKT".to_string(),
+                quantity: 1.0,
+                unit_price: 40.0,
+                mrp: 40.0,
+                gst_rate: 0.0,
+                hsn_code: None,
+                expiry_date: Some("2026-11-20".to_string()),
+                batch_number: Some("BATCH-SPECIAL-01".to_string()),
+            }],
+            discount_amount: 0.0,
+            payment_mode: "CASH".to_string(),
+            notes: None,
+            round_off: None,
+            ..Default::default()
+        }).unwrap();
+
+        assert_eq!(sale2.items[0].expiry_date, Some("2026-11-20".to_string()));
+        assert_eq!(sale2.items[0].batch_number, Some("BATCH-SPECIAL-01".to_string()));
+    }
 }
+
 

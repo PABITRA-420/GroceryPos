@@ -12,6 +12,8 @@ pub struct ShopProfile {
     pub shop_gstin: Option<String>,
     pub shop_upi_id: Option<String>,
     pub invoice_footer: String,
+    #[serde(default)]
+    pub manager_pin: Option<String>,
 }
 
 impl Default for ShopProfile {
@@ -25,6 +27,7 @@ impl Default for ShopProfile {
             shop_gstin: None,
             shop_upi_id: None,
             invoice_footer: "Thank you for shopping with us! Please visit again.".to_string(),
+            manager_pin: Some("1234".to_string()),
         }
     }
 }
@@ -69,6 +72,7 @@ pub fn get_shop_profile_db(conn: &Connection) -> Result<ShopProfile, String> {
     let shop_gstin = get_optional_setting_val(conn, "shop_gstin");
     let shop_upi_id = get_optional_setting_val(conn, "shop_upi_id");
     let invoice_footer = get_setting_val(conn, "invoice_footer", &default.invoice_footer);
+    let manager_pin = get_optional_setting_val(conn, "manager_pin").or_else(|| Some("1234".to_string()));
 
     Ok(ShopProfile {
         shop_name: if shop_name.trim().is_empty() {
@@ -87,6 +91,7 @@ pub fn get_shop_profile_db(conn: &Connection) -> Result<ShopProfile, String> {
         } else {
             invoice_footer
         },
+        manager_pin,
     })
 }
 
@@ -150,6 +155,14 @@ pub fn save_shop_profile_db(
     tx.execute(upsert_sql, params!["invoice_footer", footer])
         .map_err(|e| format!("Failed to save invoice_footer: {}", e))?;
 
+    if let Some(ref pin) = profile.manager_pin {
+        let clean_pin = pin.trim();
+        if !clean_pin.is_empty() {
+            tx.execute(upsert_sql, params!["manager_pin", clean_pin])
+                .map_err(|e| format!("Failed to save manager_pin: {}", e))?;
+        }
+    }
+
     tx.commit()
         .map_err(|e| format!("Failed to commit shop profile: {}", e))?;
 
@@ -194,6 +207,7 @@ mod tests {
             shop_gstin: Some("19ABCDE1234F1Z5".to_string()),
             shop_upi_id: Some("9876543210@paytm".to_string()),
             invoice_footer: "Goods once sold cannot be returned after 7 days.".to_string(),
+            manager_pin: Some("4321".to_string()),
         };
 
         let saved = save_shop_profile_db(&mut conn, new_profile.clone()).expect("Should save profile");
@@ -204,6 +218,7 @@ mod tests {
         assert_eq!(saved.shop_gstin, Some("19ABCDE1234F1Z5".to_string()));
         assert_eq!(saved.shop_upi_id, Some("9876543210@paytm".to_string()));
         assert_eq!(saved.invoice_footer, "Goods once sold cannot be returned after 7 days.");
+        assert_eq!(saved.manager_pin, Some("4321".to_string()));
 
         let fetched = get_shop_profile_db(&conn).expect("Should fetch profile");
         assert_eq!(fetched, saved);
@@ -221,6 +236,7 @@ mod tests {
             shop_gstin: None,
             shop_upi_id: None,
             invoice_footer: "".to_string(),
+            manager_pin: Some("1234".to_string()),
         };
 
         let result = save_shop_profile_db(&mut conn, bad_profile);

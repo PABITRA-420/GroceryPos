@@ -15,14 +15,20 @@ import {
   Boxes,
   Sliders,
   History,
+  Upload,
+  Download,
+  Tag,
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
 import { StockAdjustmentModal } from '../../components/inventory/StockAdjustmentModal';
 import { StockLedgerModal } from '../../components/inventory/StockLedgerModal';
+import { BulkImportModal } from '../../components/products/BulkImportModal';
+import { BarcodeLabelModal } from '../../components/products/BarcodeLabelModal';
 import { productService, GROCERY_UNITS, GST_RATES, COMMON_GROCERY_HSN } from '../../services/productService';
-import type { Product, CreateProductInput, UpdateProductInput } from '../../types';
+import { billingService } from '../../services/billingService';
+import type { Product, CreateProductInput, UpdateProductInput, ShopProfile } from '../../types';
 
 // Standard grocery categories commonly used in India
 const DEFAULT_CATEGORIES = [
@@ -55,7 +61,7 @@ export const ProductsPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
-  const [stockFilter, setStockFilter] = useState<'all' | 'in_stock' | 'low_stock' | 'out_of_stock'>('all');
+  const [stockFilter, setStockFilter] = useState<'all' | 'in_stock' | 'low_stock' | 'out_of_stock' | 'expiring_soon' | 'expired'>('all');
 
   // Modals state
   const [isFormOpen, setIsFormOpen] = useState<boolean>(false);
@@ -71,6 +77,18 @@ export const ProductsPage: React.FC = () => {
   // Stock Adjustment & Ledger modal state
   const [adjustingProduct, setAdjustingProduct] = useState<Product | null>(null);
   const [ledgerProduct, setLedgerProduct] = useState<Product | null>(null);
+  const [isBulkImportOpen, setIsBulkImportOpen] = useState<boolean>(false);
+  const [barcodeProduct, setBarcodeProduct] = useState<Product | null>(null);
+  const [isBarcodeModalOpen, setIsBarcodeModalOpen] = useState<boolean>(false);
+  const [shopProfile, setShopProfile] = useState<ShopProfile>({
+    shop_name: 'Apna Grocery Store',
+    owner_name: '',
+    shop_address: '',
+    shop_phone: '',
+    shop_email: null,
+    shop_gstin: null,
+    invoice_footer: '',
+  });
 
   // Success toast / notification banner
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -88,6 +106,8 @@ export const ProductsPage: React.FC = () => {
     gst_rate: '0',
     stock: '0',
     minimum_stock: '5',
+    batch_number: '',
+    expiry_date: '',
   });
   const [fieldErrors, setFieldErrors] = useState<FormErrors>({});
 
@@ -117,6 +137,7 @@ export const ProductsPage: React.FC = () => {
 
   useEffect(() => {
     loadProducts();
+    billingService.getShopProfile().then(setShopProfile).catch(() => {});
   }, [loadProducts]);
 
   // Global F3 shortcut listener to open Add Product
@@ -140,35 +161,75 @@ export const ProductsPage: React.FC = () => {
     return Array.from(set).sort();
   }, [products]);
 
+  // Expiry status calculator helper
+  const getExpiryStatus = useCallback((expiryDate?: string | null) => {
+    if (!expiryDate) return null;
+    const exp = new Date(expiryDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    exp.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((exp.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    if (diffDays < 0) {
+      return { type: 'expired' as const, label: `EXPIRED (${Math.abs(diffDays)}d ago)`, diffDays, color: 'bg-rose-100 text-rose-800 border-rose-300' };
+    } else if (diffDays <= 30) {
+      return { type: 'near_expiry' as const, label: `Expires in ${diffDays}d`, diffDays, color: 'bg-amber-100 text-amber-800 border-amber-300' };
+    } else {
+      return { type: 'fresh' as const, label: `Exp: ${expiryDate}`, diffDays, color: 'bg-slate-100 text-slate-700 border-slate-200' };
+    }
+  }, []);
+
   // Stock summary counts
   const stockStats = useMemo(() => {
     let low = 0;
     let out = 0;
+    let expired = 0;
+    let expiringSoon = 0;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
     products.forEach((p) => {
       if (p.stock <= 0) {
         out++;
       } else if (p.stock <= p.minimum_stock) {
         low++;
       }
+
+      if (p.expiry_date) {
+        const exp = new Date(p.expiry_date);
+        exp.setHours(0, 0, 0, 0);
+        const diffDays = Math.round((exp.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+        if (diffDays < 0) {
+          expired++;
+        } else if (diffDays <= 30) {
+          expiringSoon++;
+        }
+      }
     });
+
     return {
       total: products.length,
       lowStock: low,
       outOfStock: out,
       inStock: products.length - low - out,
+      expired,
+      expiringSoon,
     };
   }, [products]);
 
   // Filtered and searched products
   const filteredProducts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
     return products.filter((p) => {
       // 1. Search Query
       if (q) {
         const matchesName = p.name.toLowerCase().includes(q);
         const matchesBarcode = p.barcode ? p.barcode.toLowerCase().includes(q) : false;
         const matchesHsn = p.hsn_code ? p.hsn_code.toLowerCase().includes(q) : false;
-        if (!matchesName && !matchesBarcode && !matchesHsn) return false;
+        const matchesBatch = p.batch_number ? p.batch_number.toLowerCase().includes(q) : false;
+        if (!matchesName && !matchesBarcode && !matchesHsn && !matchesBatch) return false;
       }
 
       // 2. Category Filter
@@ -176,10 +237,24 @@ export const ProductsPage: React.FC = () => {
         return false;
       }
 
-      // 3. Stock Status Filter
+      // 3. Stock & Expiry Status Filter
       if (stockFilter === 'out_of_stock' && p.stock > 0) return false;
       if (stockFilter === 'low_stock' && (p.stock <= 0 || p.stock > p.minimum_stock)) return false;
       if (stockFilter === 'in_stock' && p.stock <= p.minimum_stock) return false;
+
+      if (stockFilter === 'expired') {
+        if (!p.expiry_date) return false;
+        const exp = new Date(p.expiry_date);
+        exp.setHours(0, 0, 0, 0);
+        if (exp >= today) return false;
+      }
+      if (stockFilter === 'expiring_soon') {
+        if (!p.expiry_date) return false;
+        const exp = new Date(p.expiry_date);
+        exp.setHours(0, 0, 0, 0);
+        const diffDays = Math.round((exp.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+        if (diffDays < 0 || diffDays > 30) return false;
+      }
 
       return true;
     });
@@ -200,6 +275,8 @@ export const ProductsPage: React.FC = () => {
       gst_rate: '0',
       stock: '0',
       minimum_stock: '5',
+      batch_number: '',
+      expiry_date: '',
     });
     setFieldErrors({});
     setFormError(null);
@@ -220,6 +297,8 @@ export const ProductsPage: React.FC = () => {
       gst_rate: String(product.gst_rate),
       stock: String(product.stock),
       minimum_stock: String(product.minimum_stock),
+      batch_number: product.batch_number || '',
+      expiry_date: product.expiry_date || '',
     });
     setFieldErrors({});
     setFormError(null);
@@ -309,6 +388,8 @@ export const ProductsPage: React.FC = () => {
           gst_rate,
           stock,
           minimum_stock,
+          batch_number: formData.batch_number.trim() || null,
+          expiry_date: formData.expiry_date.trim() || null,
         };
         const updated = await productService.updateProduct(updatePayload);
         setProducts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
@@ -329,6 +410,8 @@ export const ProductsPage: React.FC = () => {
           gst_rate,
           stock,
           minimum_stock,
+          batch_number: formData.batch_number.trim() || null,
+          expiry_date: formData.expiry_date.trim() || null,
         };
         const created = await productService.createProduct(createPayload);
         setProducts((prev) => [created, ...prev]);
@@ -420,7 +503,63 @@ export const ProductsPage: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <Button
+            variant="outline"
+            size="md"
+            icon={<Download className="w-4 h-4" />}
+            onClick={() => {
+              if (products.length === 0) {
+                setNotification({ type: 'error', message: 'No products available to export.' });
+                return;
+              }
+              const csv = productService.exportProductsToCsv(filteredProducts);
+              const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              const dateStr = new Date().toISOString().slice(0, 10);
+              a.setAttribute('download', `grocery_catalog_${dateStr}.csv`);
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+              setNotification({
+                type: 'success',
+                message: `Exported ${filteredProducts.length} product(s) to CSV successfully.`,
+              });
+            }}
+            title="Export catalog to CSV"
+          >
+            Export CSV
+          </Button>
+
+          <Button
+            variant="outline"
+            size="md"
+            icon={<Upload className="w-4 h-4" />}
+            onClick={() => setIsBulkImportOpen(true)}
+            title="Bulk import products from CSV file"
+          >
+            Import CSV
+          </Button>
+
+          <Button
+            variant="outline"
+            size="md"
+            icon={<Tag className="w-4 h-4 text-emerald-600" />}
+            onClick={() => {
+              if (products.length > 0) {
+                setBarcodeProduct(products[0]);
+                setIsBarcodeModalOpen(true);
+              }
+            }}
+            disabled={products.length === 0}
+            title="Generate thermal barcode stickers for loose goods (100g, 250g, 500g, 1kg)"
+          >
+            Barcode Stickers
+          </Button>
+
           <Button
             variant="outline"
             size="md"
@@ -444,65 +583,95 @@ export const ProductsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Stock Summary Strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+      {/* Stock & Expiry Summary Strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <button
           onClick={() => setStockFilter('all')}
-          className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+          className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
             stockFilter === 'all'
               ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
               : 'bg-white text-slate-800 border-slate-200 hover:border-slate-300'
           }`}
         >
-          <div className={`text-xs font-semibold uppercase tracking-wider ${stockFilter === 'all' ? 'text-slate-300' : 'text-slate-500'}`}>
+          <div className={`text-[11px] font-semibold uppercase tracking-wider ${stockFilter === 'all' ? 'text-slate-300' : 'text-slate-500'}`}>
             Total Products
           </div>
-          <div className="text-2xl font-bold mt-1">{stockStats.total}</div>
+          <div className="text-xl font-bold mt-1">{stockStats.total}</div>
         </button>
 
         <button
           onClick={() => setStockFilter('in_stock')}
-          className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+          className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
             stockFilter === 'in_stock'
               ? 'bg-emerald-700 text-white border-emerald-700 shadow-xs'
               : 'bg-white text-slate-800 border-slate-200 hover:border-slate-300'
           }`}
         >
-          <div className={`text-xs font-semibold uppercase tracking-wider flex items-center gap-1.5 ${stockFilter === 'in_stock' ? 'text-emerald-100' : 'text-emerald-700'}`}>
+          <div className={`text-[11px] font-semibold uppercase tracking-wider flex items-center gap-1.5 ${stockFilter === 'in_stock' ? 'text-emerald-100' : 'text-emerald-700'}`}>
             <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
             In Stock
           </div>
-          <div className="text-2xl font-bold mt-1">{stockStats.inStock}</div>
+          <div className="text-xl font-bold mt-1">{stockStats.inStock}</div>
         </button>
 
         <button
           onClick={() => setStockFilter('low_stock')}
-          className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+          className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
             stockFilter === 'low_stock'
               ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
               : 'bg-white text-slate-800 border-slate-200 hover:border-slate-300'
           }`}
         >
-          <div className={`text-xs font-semibold uppercase tracking-wider flex items-center gap-1.5 ${stockFilter === 'low_stock' ? 'text-amber-100' : 'text-amber-700'}`}>
+          <div className={`text-[11px] font-semibold uppercase tracking-wider flex items-center gap-1.5 ${stockFilter === 'low_stock' ? 'text-amber-100' : 'text-amber-700'}`}>
             <AlertTriangle className="w-3.5 h-3.5" />
-            Low Stock Alert
+            Low Stock
           </div>
-          <div className="text-2xl font-bold mt-1">{stockStats.lowStock}</div>
+          <div className="text-xl font-bold mt-1">{stockStats.lowStock}</div>
         </button>
 
         <button
           onClick={() => setStockFilter('out_of_stock')}
-          className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+          className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
             stockFilter === 'out_of_stock'
               ? 'bg-rose-700 text-white border-rose-700 shadow-xs'
               : 'bg-white text-slate-800 border-slate-200 hover:border-slate-300'
           }`}
         >
-          <div className={`text-xs font-semibold uppercase tracking-wider flex items-center gap-1.5 ${stockFilter === 'out_of_stock' ? 'text-rose-100' : 'text-rose-700'}`}>
+          <div className={`text-[11px] font-semibold uppercase tracking-wider flex items-center gap-1.5 ${stockFilter === 'out_of_stock' ? 'text-rose-100' : 'text-rose-700'}`}>
             <XCircle className="w-3.5 h-3.5" />
             Out of Stock
           </div>
-          <div className="text-2xl font-bold mt-1">{stockStats.outOfStock}</div>
+          <div className="text-xl font-bold mt-1">{stockStats.outOfStock}</div>
+        </button>
+
+        <button
+          onClick={() => setStockFilter('expiring_soon')}
+          className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+            stockFilter === 'expiring_soon'
+              ? 'bg-amber-500 text-white border-amber-500 shadow-xs'
+              : 'bg-white text-slate-800 border-slate-200 hover:border-slate-300'
+          }`}
+        >
+          <div className={`text-[11px] font-semibold uppercase tracking-wider flex items-center gap-1.5 ${stockFilter === 'expiring_soon' ? 'text-amber-100' : 'text-amber-600'}`}>
+            <AlertTriangle className="w-3.5 h-3.5" />
+            Expiring Soon
+          </div>
+          <div className="text-xl font-bold mt-1">{stockStats.expiringSoon}</div>
+        </button>
+
+        <button
+          onClick={() => setStockFilter('expired')}
+          className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+            stockFilter === 'expired'
+              ? 'bg-red-800 text-white border-red-800 shadow-xs'
+              : 'bg-white text-slate-800 border-slate-200 hover:border-slate-300'
+          }`}
+        >
+          <div className={`text-[11px] font-semibold uppercase tracking-wider flex items-center gap-1.5 ${stockFilter === 'expired' ? 'text-red-200' : 'text-red-700'}`}>
+            <XCircle className="w-3.5 h-3.5" />
+            Expired
+          </div>
+          <div className="text-xl font-bold mt-1">{stockStats.expired}</div>
         </button>
       </div>
 
@@ -641,9 +810,27 @@ export const ProductsPage: React.FC = () => {
                       key={p.id}
                       className="hover:bg-slate-50/80 transition-colors group"
                     >
-                      {/* Product Name */}
-                      <td className="py-3 px-4 font-bold text-slate-900 text-sm">
-                        {p.name}
+                      {/* Product Name & Batch/Expiry Badges */}
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-slate-900 text-sm">{p.name}</div>
+                        {(p.batch_number || p.expiry_date) && (
+                          <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                            {p.batch_number && (
+                              <span className="text-[10px] font-mono px-1.5 py-0.5 bg-slate-100 text-slate-700 rounded border border-slate-200">
+                                Lot: {p.batch_number}
+                              </span>
+                            )}
+                            {(() => {
+                              const expStatus = getExpiryStatus(p.expiry_date);
+                              if (!expStatus) return null;
+                              return (
+                                <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${expStatus.color}`}>
+                                  {expStatus.label}
+                                </span>
+                              );
+                            })()}
+                          </div>
+                        )}
                       </td>
 
                       {/* Barcode & HSN */}
@@ -738,6 +925,16 @@ export const ProductsPage: React.FC = () => {
                       {/* Actions */}
                       <td className="py-3 px-4 text-right">
                         <div className="flex items-center justify-end gap-1 opacity-90 group-hover:opacity-100">
+                          <button
+                            onClick={() => {
+                              setBarcodeProduct(p);
+                              setIsBarcodeModalOpen(true);
+                            }}
+                            className="p-1.5 text-slate-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-md transition-colors"
+                            title="Print Barcode Labels (Repackaged 100g, 250g, 500g, 1kg)"
+                          >
+                            <Tag className="w-4 h-4" />
+                          </button>
                           <button
                             onClick={() => setAdjustingProduct(p)}
                             className="p-1.5 text-slate-600 hover:text-amber-700 hover:bg-amber-50 rounded-md transition-colors"
@@ -1023,6 +1220,40 @@ export const ProductsPage: React.FC = () => {
             </div>
           </div>
 
+          {/* Row 5: Batch Number & Expiry Date (FMCG Traceability & Shelf-Life) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 p-3.5 bg-amber-50/50 rounded-xl border border-amber-200/60">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Batch / Lot Number
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. BATCH-2026-01"
+                value={formData.batch_number}
+                onChange={(e) => setFormData({ ...formData, batch_number: e.target.value })}
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white font-mono uppercase"
+              />
+              <span className="text-[10px] text-slate-500 mt-0.5 block">
+                FMCG manufacturer/packaging lot code
+              </span>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Expiry / Best Before Date
+              </label>
+              <input
+                type="date"
+                value={formData.expiry_date}
+                onChange={(e) => setFormData({ ...formData, expiry_date: e.target.value })}
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white font-medium"
+              />
+              <span className="text-[10px] text-slate-500 mt-0.5 block">
+                Enables near-expiry alerts and POS scan safety
+              </span>
+            </div>
+          </div>
+
           {/* Action Buttons */}
           <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-3">
             <Button
@@ -1128,6 +1359,27 @@ export const ProductsPage: React.FC = () => {
           onClose={() => setLedgerProduct(null)}
         />
       )}
+
+      {/* CSV Bulk Import Modal */}
+      <BulkImportModal
+        isOpen={isBulkImportOpen}
+        onClose={() => setIsBulkImportOpen(false)}
+        onSuccess={(summary) => {
+          loadProducts();
+          setNotification({
+            type: 'success',
+            message: `Bulk Import Complete: ${summary.inserted} product(s) added, ${summary.updated} updated, ${summary.skipped} skipped.`,
+          });
+        }}
+      />
+
+      {/* Loose Goods Thermal Barcode Label Printing Modal (P2.4) */}
+      <BarcodeLabelModal
+        isOpen={isBarcodeModalOpen}
+        onClose={() => setIsBarcodeModalOpen(false)}
+        product={barcodeProduct}
+        shopProfile={shopProfile}
+      />
     </div>
   );
 };

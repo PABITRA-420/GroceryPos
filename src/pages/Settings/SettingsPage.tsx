@@ -11,11 +11,13 @@ import {
   Upload,
   ShieldCheck,
   AlertTriangle,
+  FolderOpen,
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Modal } from '../../components/ui/Modal';
 import { billingService } from '../../services/billingService';
 import { inventoryService } from '../../services/inventoryService';
+import { tauriService } from '../../services/tauriService';
 import type { SystemInfo, ShopProfile } from '../../types';
 
 interface SettingsPageProps {
@@ -36,6 +38,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     shop_gstin: '',
     shop_upi_id: '',
     invoice_footer: 'Thank you for shopping with us! Please visit again.',
+    manager_pin: '1234',
   });
 
   const [isSaving, setIsSaving] = useState(false);
@@ -66,6 +69,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         shop_gstin: data.shop_gstin || '',
         shop_upi_id: data.shop_upi_id || '',
         invoice_footer: data.invoice_footer || 'Thank you for shopping with us! Please visit again.',
+        manager_pin: data.manager_pin || '1234',
       });
     } catch (err) {
       console.error('Failed to load shop profile:', err);
@@ -93,6 +97,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         shop_gstin: profile.shop_gstin?.trim() || null,
         shop_upi_id: profile.shop_upi_id?.trim() || null,
         invoice_footer: profile.invoice_footer.trim() || 'Thank you for shopping with us! Please visit again.',
+        manager_pin: profile.manager_pin?.trim() || '1234',
       });
 
       setProfile({
@@ -104,6 +109,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         shop_gstin: saved.shop_gstin || '',
         shop_upi_id: saved.shop_upi_id || '',
         invoice_footer: saved.invoice_footer,
+        manager_pin: saved.manager_pin || '1234',
       });
 
       setSaveSuccess(true);
@@ -127,6 +133,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       setErrorMessage(`Backup failed: ${msg}`);
     } finally {
       setIsBackingUp(false);
+    }
+  };
+
+  const handleBrowseRestoreFile = async () => {
+    const selected = await tauriService.openFileDialog('SQLite Database', 'db');
+    if (selected) {
+      setRestoreFilePath(selected);
     }
   };
 
@@ -321,6 +334,25 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 className="w-full text-sm px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
               />
             </div>
+
+            <div className="pt-3 border-t border-slate-100">
+              <label className="block text-xs font-semibold text-purple-700 mb-1">
+                Manager / Owner Security PIN (4 Digits)
+              </label>
+              <div className="flex items-center gap-3">
+                <input
+                  type="password"
+                  maxLength={4}
+                  value={profile.manager_pin || ''}
+                  onChange={(e) => setProfile({ ...profile, manager_pin: e.target.value.replace(/\D/g, '').slice(0, 4) })}
+                  placeholder="1234"
+                  className="w-32 text-sm px-3 py-2 bg-purple-50/50 border border-purple-300 rounded-lg focus:bg-white focus:outline-none focus:ring-2 focus:ring-purple-500 font-mono tracking-widest text-center"
+                />
+                <span className="text-xs text-slate-500">
+                  Required to access Settings, gross profit margins, product deletion, and terminal unlocking.
+                </span>
+              </div>
+            </div>
           </form>
 
           {/* Live Receipt Header Preview */}
@@ -494,13 +526,28 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             <label className="block text-xs font-semibold text-slate-700 mb-1">
               Source Backup File (.db path) <span className="text-red-500">*</span>
             </label>
-            <input
-              type="text"
-              value={restoreFilePath}
-              onChange={(e) => setRestoreFilePath(e.target.value)}
-              placeholder="e.g. C:\Users\Shop\Documents\grocerypos_backup.db"
-              className="w-full text-xs font-mono px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
-            />
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={restoreFilePath}
+                onChange={(e) => setRestoreFilePath(e.target.value)}
+                placeholder="Select or enter full .db file path"
+                className="flex-1 text-xs font-mono px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                icon={<FolderOpen className="w-3.5 h-3.5 text-slate-600" />}
+                onClick={handleBrowseRestoreFile}
+                type="button"
+                className="shrink-0"
+              >
+                Browse...
+              </Button>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Click <strong>Browse...</strong> to open the Windows file selector and choose your backup <code>.db</code> file.
+            </p>
           </div>
 
           <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
