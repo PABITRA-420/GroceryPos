@@ -217,8 +217,12 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           </div>
           <div className="truncate">
             <div className="text-slate-400 font-medium uppercase tracking-wider text-[10px]">STORAGE LOCATION</div>
-            <div className="font-mono text-slate-600 text-[11px] mt-0.5 truncate" title={dbStatus?.file_path || 'Per-user AppData'}>
-              {dbStatus?.file_path ? 'AppData (Local)' : 'Resolving...'}
+            <div className="font-semibold text-xs mt-0.5 truncate" title={dbStatus?.file_path || 'Per-user AppData'}>
+              {dbStatus?.is_portable ? (
+                <span className="text-emerald-700 font-bold">Portable Mode (./data)</span>
+              ) : (
+                <span className="text-slate-700 font-medium">System AppData</span>
+              )}
             </div>
           </div>
         </div>

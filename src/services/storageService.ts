@@ -72,11 +72,27 @@ export const storageService = {
     return {
       connected: false,
       file_path: 'In-Memory / Browser Preview (Launch desktop app for real SQLite)',
+      is_portable: false,
       migrations_applied: 1,
       total_tables: 5,
       wal_enabled: false,
       foreign_keys_enabled: false,
       error: 'Running in browser preview mode.',
     };
+  },
+
+  /**
+   * Opens the application data / portable database folder in the operating system's file manager (Windows File Explorer).
+   */
+  async openDataFolder(): Promise<string> {
+    if (isTauriEnvironment()) {
+      try {
+        return await invoke<string>('open_data_folder');
+      } catch (err) {
+        console.error('Failed to open data folder:', err);
+        throw new Error(String(err));
+      }
+    }
+    return '';
   },
 };

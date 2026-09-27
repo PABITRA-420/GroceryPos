@@ -21,6 +21,7 @@ const MIGRATION_005_SQL: &str = include_str!("../migrations/005_expiry_and_batch
 pub struct DatabaseStatus {
     pub connected: bool,
     pub file_path: String,
+    pub is_portable: bool,
     pub migrations_applied: i32,
     pub total_tables: i32,
     pub wal_enabled: bool,
@@ -78,23 +79,82 @@ where
     Ok(result)
 }
 
-/// Resolves the secure, per-user application data directory for the SQLite database.
-///
-/// On Windows, this resolves to `%APPDATA%\com.grocerypos.desktop\` (e.g. Roaming AppData).
-/// Does NOT store database files in the source tree or use hardcoded paths.
-pub fn get_database_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
+/// Determines if the application is running in portable mode.
+/// Portable mode is triggered if:
+/// 1. Environment variable `GROCERYPOS_PORTABLE` is "1" or "true".
+/// 2. CLI argument `--portable` is present.
+/// 3. A file marker `.portable` or `portable.txt` exists in the executable's directory.
+/// 4. A folder named `data` exists in the executable's directory.
+pub fn is_portable_mode() -> bool {
+    if std::env::var("GROCERYPOS_PORTABLE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    if std::env::args().any(|arg| arg == "--portable") {
+        return true;
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            if exe_dir.join(".portable").exists()
+                || exe_dir.join("portable.txt").exists()
+                || exe_dir.join("data").is_dir()
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Resolves the base data directory for the application.
+/// In portable mode, this resolves to `<exe_dir>/data`.
+/// In standard installed mode, this resolves to `%APPDATA%\com.grocerypos.desktop\`.
+pub fn get_data_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    if is_portable_mode() {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let portable_data_dir = exe_dir.join("data");
+                if !portable_data_dir.exists() {
+                    fs::create_dir_all(&portable_data_dir).map_err(|e| {
+                        format!(
+                            "Failed to create portable data directory at {:?}: {}",
+                            portable_data_dir, e
+                        )
+                    })?;
+                }
+                return Ok(portable_data_dir);
+            }
+        }
+    }
+
     let app_data_dir = app_handle
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to resolve application data directory: {}", e))?;
 
-    // Ensure the application directory exists
     if !app_data_dir.exists() {
-        fs::create_dir_all(&app_data_dir)
-            .map_err(|e| format!("Failed to create application data directory {:?}: {}", app_data_dir, e))?;
+        fs::create_dir_all(&app_data_dir).map_err(|e| {
+            format!(
+                "Failed to create application data directory {:?}: {}",
+                app_data_dir, e
+            )
+        })?;
     }
 
-    Ok(app_data_dir.join("grocerypos.db"))
+    Ok(app_data_dir)
+}
+
+/// Resolves the path to the SQLite database file (`grocerypos.db`).
+/// When in portable mode, stores data directly next to the executable in `./data/grocerypos.db`.
+/// Otherwise, stores safely in the user's OS application data directory.
+pub fn get_database_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    let data_dir = get_data_dir(app_handle)?;
+    Ok(data_dir.join("grocerypos.db"))
 }
 
 /// Configures SQLite PRAGMA settings for enterprise-grade desktop reliability:
@@ -337,6 +397,7 @@ fn collect_status(conn: &Connection, db_path: &Path) -> Result<DatabaseStatus, S
     Ok(DatabaseStatus {
         connected: true,
         file_path: db_path.to_string_lossy().to_string(),
+        is_portable: is_portable_mode(),
         migrations_applied,
         total_tables,
         wal_enabled: journal_mode.to_lowercase() == "wal",
@@ -396,6 +457,7 @@ pub fn get_status(state: &DbState) -> Result<DatabaseStatus, String> {
         _ => Ok(DatabaseStatus {
             connected: false,
             file_path: String::new(),
+            is_portable: is_portable_mode(),
             migrations_applied: 0,
             total_tables: 0,
             wal_enabled: false,
@@ -721,6 +783,15 @@ mod tests {
 
         // Clean up temp test files
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_portable_mode_detection() {
+        // Test environment variable detection
+        std::env::set_var("GROCERYPOS_PORTABLE", "1");
+        assert!(is_portable_mode(), "Must detect portable mode when GROCERYPOS_PORTABLE=1");
+
+        std::env::remove_var("GROCERYPOS_PORTABLE");
     }
 }
 
