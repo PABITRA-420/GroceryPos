@@ -52,6 +52,13 @@ New-Item -ItemType Directory -Force -Path "$DistFolder/data/backups" | Out-Null
 # Copy release binary
 Copy-Item -Path $ReleaseExe -Destination "$DistFolder/GroceryPOS.exe" -Force
 
+# Copy WebView2Loader.dll (required for Windows GNU/MinGW targets)
+$WebViewDll = "src-tauri/target/release/WebView2Loader.dll"
+if (Test-Path $WebViewDll) {
+    Copy-Item -Path $WebViewDll -Destination "$DistFolder/WebView2Loader.dll" -Force
+    Write-Host "Included WebView2Loader.dll runtime library." -ForegroundColor Cyan
+}
+
 # Create portable flag
 New-Item -ItemType File -Force -Path "$DistFolder/.portable" | Out-Null
 

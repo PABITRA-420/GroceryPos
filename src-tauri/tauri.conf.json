@@ -1,6 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "GroceryPOS",
+  "mainBinaryName": "GroceryPOS",
   "version": "0.1.0",
   "identifier": "com.grocerypos.desktop",
   "build": {
@@ -37,6 +38,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "hooks.nsh"
+      }
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }
