@@ -745,6 +745,7 @@ mod tests {
         conn.execute_batch(include_str!("../migrations/001_initial_schema.sql")).unwrap();
         conn.execute_batch(include_str!("../migrations/002_sales_indexes.sql")).unwrap();
         conn.execute_batch(include_str!("../migrations/003_returns_and_stock_ledger.sql")).unwrap();
+        conn.execute_batch(include_str!("../migrations/004_hsn_and_gstin.sql")).unwrap();
         conn
     }
 
@@ -773,6 +774,7 @@ mod tests {
                 unit_price: 25.0,
                 mrp: 25.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -850,6 +852,7 @@ mod tests {
                 unit_price: 100.0,
                 mrp: 100.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -899,6 +902,7 @@ mod tests {
                 unit_price: 20.0,
                 mrp: 20.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -963,6 +967,7 @@ mod tests {
                 unit_price: 30.0,
                 mrp: 30.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 0.0,
             payment_mode: "CASH".to_string(),
@@ -1015,6 +1020,7 @@ mod tests {
                 unit_price: 500.0,
                 mrp: 500.0,
                 gst_rate: 0.0,
+                hsn_code: None,
             }],
             discount_amount: 100.0,
             payment_mode: "UPI".to_string(),

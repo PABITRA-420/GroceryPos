@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import QRCode from 'qrcode';
 import { Printer, CheckCircle, FileText, Smartphone, History, ArrowLeft, RotateCcw } from 'lucide-react';
 import { Button } from '../ui/Button';
 import {
@@ -6,6 +7,7 @@ import {
   formatSaleDateTime,
   formatQuantity,
 } from '../../services/billingService';
+import { numberToWordsIndian } from '../../utils/numberToWords';
 import type { SaleResult, ShopProfile } from '../../types';
 
 interface InvoiceReceiptProps {
@@ -32,6 +34,7 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
   onInitiateReturn,
 }) => {
   const [printFormat, setPrintFormat] = useState<'thermal' | 'standard'>('thermal');
+  const [upiQrDataUrl, setUpiQrDataUrl] = useState<string | null>(null);
   const { sale, items } = saleResult;
 
   // Deterministically parse the stored historical sale created_at timestamp.
@@ -42,9 +45,53 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
   const customerName = sale.customer_name?.trim() || 'Walk-in Customer';
   const customerPhone = sale.customer_phone?.trim() ? sale.customer_phone.trim() : '—';
 
+  // Generate UPI QR Code data URL if shop_upi_id is configured
+  useEffect(() => {
+    if (shopProfile.shop_upi_id?.trim()) {
+      const cleanUpi = shopProfile.shop_upi_id.trim();
+      const amountStr = sale.total_amount.toFixed(2);
+      const uri = `upi://pay?pa=${encodeURIComponent(cleanUpi)}&pn=${encodeURIComponent(
+        shopProfile.shop_name || 'Grocery Store'
+      )}&am=${amountStr}&cu=INR&tn=${encodeURIComponent('Bill ' + sale.invoice_number)}`;
+
+      QRCode.toDataURL(uri, { width: 120, margin: 1 })
+        .then((url) => setUpiQrDataUrl(url))
+        .catch((err) => console.error('Failed to generate receipt QR:', err));
+    } else {
+      setUpiQrDataUrl(null);
+    }
+  }, [shopProfile.shop_upi_id, shopProfile.shop_name, sale.total_amount, sale.invoice_number]);
+
   // Financial calculations & round-off
   const rawNetTotal = sale.subtotal - sale.discount_amount + sale.tax_amount;
   const roundOff = Math.round((sale.total_amount - rawNetTotal) * 100) / 100;
+  const amountInWords = numberToWordsIndian(sale.total_amount);
+
+  // Group tax breakdown by distinct GST rate slab (e.g. 5% -> 2.5% CGST + 2.5% SGST)
+  const taxSlabs = React.useMemo(() => {
+    const slabMap = new Map<number, { taxableAmount: number; taxAmount: number }>();
+    for (const item of items) {
+      if (item.gst_rate > 0) {
+        const rate = item.gst_rate;
+        const current = slabMap.get(rate) || { taxableAmount: 0, taxAmount: 0 };
+        current.taxableAmount += item.quantity * item.unit_price;
+        current.taxAmount += item.tax_amount;
+        slabMap.set(rate, current);
+      }
+    }
+    return Array.from(slabMap.entries()).map(([gstRate, data]) => {
+      const halfRate = (gstRate / 2).toFixed(1).replace(/\.0$/, '');
+      const halfTax = data.taxAmount / 2;
+      return {
+        gstRate,
+        halfRate,
+        taxableAmount: data.taxableAmount,
+        totalTax: data.taxAmount,
+        cgst: halfTax,
+        sgst: halfTax,
+      };
+    });
+  }, [items]);
 
   const handlePrint = () => {
     window.print();
@@ -176,14 +223,14 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
           id="invoice-printable-area"
           className={`bg-white text-slate-900 shadow-sm border border-slate-200 p-6 print:p-0 print:border-0 print:shadow-none ${
             printFormat === 'thermal'
-              ? 'w-[360px] text-xs font-mono'
-              : 'w-full max-w-3xl text-sm font-sans'
+              ? 'receipt-thermal w-[360px] text-xs font-mono'
+              : 'receipt-standard w-full max-w-3xl text-sm font-sans'
           }`}
         >
           {/* ==================================================== */}
           {/* 1. SHOP BRANDING HEADER                              */}
           {/* ==================================================== */}
-          <div className="text-center border-b border-dashed border-slate-300 pb-3 mb-3">
+          <div className="receipt-block text-center border-b border-dashed border-slate-300 pb-3 mb-3">
             <h1 className="text-lg font-black uppercase tracking-wider text-slate-900">
               {shopProfile.shop_name || 'APNA GROCERY STORE'}
             </h1>
@@ -209,7 +256,7 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
           {/* ==================================================== */}
           {/* 2. INVOICE NUMBER BAR                                */}
           {/* ==================================================== */}
-          <div className="flex justify-between items-center mb-2 px-1">
+          <div className="receipt-block flex justify-between items-center mb-2 px-1">
             <span className="font-bold text-slate-700 text-xs">TAX INVOICE:</span>
             <span className="font-black text-slate-900 font-mono text-sm tracking-wide">
               {sale.invoice_number}
@@ -219,30 +266,30 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
           {/* ==================================================== */}
           {/* 3. TWO-COLUMN CUSTOMER / DATE / TIME BOX             */}
           {/*    LEFT: Customer Name, Phone                        */}
-          {/*    RIGHT: Sale Date, Sale Time                       */}
+          {/*    RIGHT: Sale Date, Sale Time (PROMINENT BOLD)      */}
           {/* ==================================================== */}
-          <div className="border border-slate-300 rounded p-2.5 mb-4 text-[11px] grid grid-cols-2 gap-x-4 gap-y-1 bg-slate-50/50 print:bg-transparent">
+          <div className="receipt-block border border-slate-300 rounded p-2.5 mb-4 text-[11px] grid grid-cols-2 gap-x-4 gap-y-1 bg-slate-50/50 print:bg-transparent">
             {/* LEFT COLUMN: Customer info */}
             <div className="flex flex-col space-y-1">
-              <div className="flex">
+              <div className="flex items-center">
                 <span className="font-semibold text-slate-700 w-18 shrink-0">Customer:</span>
                 <span className="font-bold text-slate-900 truncate">{customerName}</span>
               </div>
-              <div className="flex">
+              <div className="flex items-center">
                 <span className="font-semibold text-slate-700 w-18 shrink-0">Phone:</span>
-                <span className="font-medium text-slate-800">{customerPhone}</span>
+                <span className="font-bold text-slate-900">{customerPhone}</span>
               </div>
             </div>
 
-            {/* RIGHT COLUMN: Sale Date & Time */}
+            {/* RIGHT COLUMN: Sale Date & Time - Exact Billing Timestamp, Font BOLD */}
             <div className="flex flex-col space-y-1">
-              <div className="flex justify-end">
-                <span className="font-semibold text-slate-700 w-12 shrink-0 text-right mr-2">Date:</span>
-                <span className="font-bold text-slate-900">{saleDate}</span>
+              <div className="flex justify-end items-center">
+                <span className="font-bold text-slate-800 w-14 shrink-0 text-right mr-2">Date:</span>
+                <span className="font-black text-slate-950 text-xs tracking-wide">{saleDate}</span>
               </div>
-              <div className="flex justify-end">
-                <span className="font-semibold text-slate-700 w-12 shrink-0 text-right mr-2">Time:</span>
-                <span className="font-medium text-slate-800">{saleTime}</span>
+              <div className="flex justify-end items-center">
+                <span className="font-bold text-slate-800 w-14 shrink-0 text-right mr-2">Time:</span>
+                <span className="font-black text-slate-950 text-xs tracking-wide">{saleTime}</span>
               </div>
             </div>
           </div>
@@ -252,66 +299,72 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
           {/* ==================================================== */}
           {printFormat === 'standard' ? (
             // Full structured table for Standard A4
-            <table className="w-full text-left text-xs border border-slate-200 mb-4">
-              <thead className="bg-slate-100 text-slate-700 font-bold border-b border-slate-300 uppercase tracking-wider text-[10px]">
-                <tr>
-                  <th className="py-2 px-2 text-center w-8">#</th>
-                  <th className="py-2 px-3">Product Description</th>
-                  <th className="py-2 px-2 text-center">Qty</th>
-                  <th className="py-2 px-2 text-center">Unit</th>
-                  <th className="py-2 px-2 text-right">Rate</th>
-                  <th className="py-2 px-2 text-right">MRP</th>
-                  <th className="py-2 px-2 text-center">GST</th>
-                  <th className="py-2 px-2 text-right">Tax</th>
-                  <th className="py-2 px-3 text-right">Total</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200 text-xs">
-                {items.map((item, idx) => (
-                  <tr key={idx} className="hover:bg-slate-50/50">
-                    <td className="py-2 px-2 text-center text-slate-500 font-mono">
-                      {idx + 1}
-                    </td>
-                    <td className="py-2 px-3">
-                      <div className="font-bold text-slate-900">{item.product_name}</div>
-                      {item.barcode && (
-                        <div className="text-[10px] text-slate-500 font-mono">{item.barcode}</div>
-                      )}
-                    </td>
-                    <td className="py-2 px-2 text-center font-bold text-slate-800 whitespace-nowrap">
-                      {formatQuantity(item.quantity)}
-                    </td>
-                    <td className="py-2 px-2 text-center text-slate-600 whitespace-nowrap">
-                      {item.unit}
-                    </td>
-                    <td className="py-2 px-2 text-right font-medium whitespace-nowrap">
-                      ₹{item.unit_price.toFixed(2)}
-                    </td>
-                    <td className="py-2 px-2 text-right text-slate-500 whitespace-nowrap">
-                      ₹{item.mrp.toFixed(2)}
-                    </td>
-                    <td className="py-2 px-2 text-center text-slate-600 whitespace-nowrap">
-                      {item.gst_rate > 0 ? `${item.gst_rate}%` : '0%'}
-                    </td>
-                    <td className="py-2 px-2 text-right text-slate-600 whitespace-nowrap">
-                      ₹{item.tax_amount.toFixed(2)}
-                    </td>
-                    <td className="py-2 px-3 text-right font-bold text-slate-900 whitespace-nowrap">
-                      ₹{item.total_price.toFixed(2)}
-                    </td>
+            <div className="receipt-table mb-4">
+              <table className="w-full text-left text-xs border border-slate-200">
+                <thead className="bg-slate-100 text-slate-700 font-bold border-b border-slate-300 uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th className="py-2 px-2 text-center w-8">#</th>
+                    <th className="py-2 px-3">Product Description</th>
+                    <th className="py-2 px-2 text-center">HSN</th>
+                    <th className="py-2 px-2 text-center">Qty</th>
+                    <th className="py-2 px-2 text-center">Unit</th>
+                    <th className="py-2 px-2 text-right">Selling Price</th>
+                    <th className="py-2 px-2 text-right">MRP</th>
+                    <th className="py-2 px-2 text-center">GST</th>
+                    <th className="py-2 px-2 text-right">Tax</th>
+                    <th className="py-2 px-3 text-right">Total</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-200 text-xs">
+                  {items.map((item, idx) => (
+                    <tr key={idx} className="hover:bg-slate-50/50">
+                      <td className="py-2 px-2 text-center text-slate-500 font-mono">
+                        {idx + 1}
+                      </td>
+                      <td className="py-2 px-3">
+                        <div className="font-bold text-slate-900">{item.product_name}</div>
+                        {item.barcode && (
+                          <div className="text-[10px] text-slate-500 font-mono">{item.barcode}</div>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 text-center font-mono text-[10px] text-slate-600">
+                        {item.hsn_code || '—'}
+                      </td>
+                      <td className="py-2 px-2 text-center font-bold text-slate-800 whitespace-nowrap">
+                        {formatQuantity(item.quantity)}
+                      </td>
+                      <td className="py-2 px-2 text-center text-slate-600 whitespace-nowrap">
+                        {item.unit}
+                      </td>
+                      <td className="py-2 px-2 text-right font-medium whitespace-nowrap">
+                        ₹{item.unit_price.toFixed(2)}
+                      </td>
+                      <td className="py-2 px-2 text-right text-slate-500 whitespace-nowrap">
+                        ₹{item.mrp.toFixed(2)}
+                      </td>
+                      <td className="py-2 px-2 text-center text-slate-600 whitespace-nowrap">
+                        {item.gst_rate > 0 ? `${item.gst_rate}%` : '0%'}
+                      </td>
+                      <td className="py-2 px-2 text-right text-slate-600 whitespace-nowrap">
+                        ₹{item.tax_amount.toFixed(2)}
+                      </td>
+                      <td className="py-2 px-3 text-right font-bold text-slate-900 whitespace-nowrap">
+                        ₹{item.total_price.toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ) : (
             // Compact table optimized for 80mm thermal paper
-            <div className="mb-3">
+            <div className="receipt-table mb-3">
               <table className="w-full text-left">
                 <thead>
                   <tr className="border-b border-slate-800 text-[10px] uppercase font-bold tracking-wider text-slate-700">
                     <th className="py-1">Item</th>
                     <th className="py-1 text-center">Qty</th>
-                    <th className="py-1 text-right">Rate</th>
+                    <th className="py-1 text-right">Sell Price</th>
                     <th className="py-1 text-right">Amount</th>
                   </tr>
                 </thead>
@@ -321,6 +374,7 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
                       <td className="py-1.5 pr-2 font-medium text-slate-800">
                         <div>{item.product_name}</div>
                         <div className="text-[9px] text-slate-500 font-normal">
+                          {item.hsn_code && <span>HSN: {item.hsn_code} · </span>}
                           MRP: ₹{item.mrp.toFixed(2)}
                           {item.gst_rate > 0 && ` · GST ${item.gst_rate}% (₹${item.tax_amount.toFixed(2)})`}
                         </div>
@@ -344,7 +398,7 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
           {/* ==================================================== */}
           {/* 5. BILL TOTALS SUMMARY                               */}
           {/* ==================================================== */}
-          <div className="border-t border-dashed border-slate-300 pt-2 space-y-1 text-xs">
+          <div className="receipt-totals border-t border-dashed border-slate-300 pt-2 space-y-1 text-xs">
             <div className="flex justify-between text-slate-600">
               <span>Subtotal:</span>
               <span className="font-medium text-slate-900">₹{sale.subtotal.toFixed(2)}</span>
@@ -361,14 +415,31 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
                   <span>Total GST:</span>
                   <span className="font-medium text-slate-900">₹{sale.tax_amount.toFixed(2)}</span>
                 </div>
-                <div className="flex justify-between text-[11px] text-slate-500 pl-2">
-                  <span>↳ CGST (50%):</span>
-                  <span>₹{(sale.tax_amount / 2).toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between text-[11px] text-slate-500 pl-2">
-                  <span>↳ SGST (50%):</span>
-                  <span>₹{(sale.tax_amount / 2).toFixed(2)}</span>
-                </div>
+                {taxSlabs.length > 0 ? (
+                  taxSlabs.map((slab) => (
+                    <React.Fragment key={slab.gstRate}>
+                      <div className="flex justify-between text-[11px] text-slate-500 pl-2">
+                        <span>↳ CGST ({slab.halfRate}%):</span>
+                        <span>₹{slab.cgst.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] text-slate-500 pl-2">
+                        <span>↳ SGST ({slab.halfRate}%):</span>
+                        <span>₹{slab.sgst.toFixed(2)}</span>
+                      </div>
+                    </React.Fragment>
+                  ))
+                ) : (
+                  <>
+                    <div className="flex justify-between text-[11px] text-slate-500 pl-2">
+                      <span>↳ CGST:</span>
+                      <span>₹{(sale.tax_amount / 2).toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between text-[11px] text-slate-500 pl-2">
+                      <span>↳ SGST:</span>
+                      <span>₹{(sale.tax_amount / 2).toFixed(2)}</span>
+                    </div>
+                  </>
+                )}
               </>
             )}
             <div className="flex justify-between text-slate-600">
@@ -383,12 +454,15 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
                 {formatCurrency(sale.total_amount)}
               </span>
             </div>
+            <div className="text-[11px] font-semibold text-slate-700 italic pt-1 border-t border-slate-200">
+              Amount in words: {amountInWords}
+            </div>
           </div>
 
           {/* ==================================================== */}
           {/* 6. PAYMENT INFORMATION                               */}
           {/* ==================================================== */}
-          <div className="border-t border-dashed border-slate-300 mt-3 pt-2 text-[11px] text-slate-600">
+          <div className="receipt-block border-t border-dashed border-slate-300 mt-3 pt-2 text-[11px] text-slate-600">
             <div className="flex justify-between">
               <span className="font-semibold text-slate-700">Payment:</span>
               <span className="font-bold text-slate-900">{sale.payment_mode}</span>
@@ -413,9 +487,28 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
           </div>
 
           {/* ==================================================== */}
+          {/* 6.5 DYNAMIC UPI QR CODE (IF CONFIGURED)              */}
+          {/* ==================================================== */}
+          {upiQrDataUrl && (
+            <div className="receipt-qr border-t border-dashed border-slate-300 mt-3 pt-3 flex flex-col items-center text-center">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-700 mb-1">
+                Scan to Pay via UPI
+              </span>
+              <img
+                src={upiQrDataUrl}
+                alt="UPI Payment QR Code"
+                className="w-24 h-24 p-1 bg-white border border-slate-300 rounded shadow-xs"
+              />
+              <span className="text-[9px] text-slate-500 font-mono mt-1">
+                {shopProfile.shop_upi_id}
+              </span>
+            </div>
+          )}
+
+          {/* ==================================================== */}
           {/* 7. FOOTER MESSAGE                                    */}
           {/* ==================================================== */}
-          <div className="border-t border-dashed border-slate-300 mt-4 pt-3 text-center text-[10px] text-slate-500">
+          <div className="receipt-block border-t border-dashed border-slate-300 mt-4 pt-3 text-center text-[10px] text-slate-500">
             <p className="font-semibold text-slate-700">
               {shopProfile.invoice_footer || 'Thank you for shopping with us! Please visit again.'}
             </p>

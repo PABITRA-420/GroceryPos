@@ -10,6 +10,7 @@ pub struct ShopProfile {
     pub shop_phone: String,
     pub shop_email: Option<String>,
     pub shop_gstin: Option<String>,
+    pub shop_upi_id: Option<String>,
     pub invoice_footer: String,
 }
 
@@ -22,6 +23,7 @@ impl Default for ShopProfile {
             shop_phone: "".to_string(),
             shop_email: None,
             shop_gstin: None,
+            shop_upi_id: None,
             invoice_footer: "Thank you for shopping with us! Please visit again.".to_string(),
         }
     }
@@ -65,6 +67,7 @@ pub fn get_shop_profile_db(conn: &Connection) -> Result<ShopProfile, String> {
     let shop_phone = get_setting_val(conn, "shop_phone", &default.shop_phone);
     let shop_email = get_optional_setting_val(conn, "shop_email");
     let shop_gstin = get_optional_setting_val(conn, "shop_gstin");
+    let shop_upi_id = get_optional_setting_val(conn, "shop_upi_id");
     let invoice_footer = get_setting_val(conn, "invoice_footer", &default.invoice_footer);
 
     Ok(ShopProfile {
@@ -78,6 +81,7 @@ pub fn get_shop_profile_db(conn: &Connection) -> Result<ShopProfile, String> {
         shop_phone,
         shop_email,
         shop_gstin,
+        shop_upi_id,
         invoice_footer: if invoice_footer.trim().is_empty() {
             default.invoice_footer
         } else {
@@ -132,6 +136,12 @@ pub fn save_shop_profile_db(
     )
     .map_err(|e| format!("Failed to save shop_gstin: {}", e))?;
 
+    tx.execute(
+        upsert_sql,
+        params!["shop_upi_id", profile.shop_upi_id.as_deref().unwrap_or("").trim()],
+    )
+    .map_err(|e| format!("Failed to save shop_upi_id: {}", e))?;
+
     let footer = if profile.invoice_footer.trim().is_empty() {
         "Thank you for shopping with us! Please visit again."
     } else {
@@ -169,6 +179,7 @@ mod tests {
         let profile = get_shop_profile_db(&conn).expect("Should return default profile");
         assert_eq!(profile.shop_name, "Apna Grocery Store");
         assert_eq!(profile.invoice_footer, "Thank you for shopping with us! Please visit again.");
+        assert_eq!(profile.shop_upi_id, None);
     }
 
     #[test]
@@ -181,6 +192,7 @@ mod tests {
             shop_phone: "9876543210".to_string(),
             shop_email: Some("rajesh@grocery.in".to_string()),
             shop_gstin: Some("19ABCDE1234F1Z5".to_string()),
+            shop_upi_id: Some("9876543210@paytm".to_string()),
             invoice_footer: "Goods once sold cannot be returned after 7 days.".to_string(),
         };
 
@@ -190,6 +202,7 @@ mod tests {
         assert_eq!(saved.shop_phone, "9876543210");
         assert_eq!(saved.shop_email, Some("rajesh@grocery.in".to_string()));
         assert_eq!(saved.shop_gstin, Some("19ABCDE1234F1Z5".to_string()));
+        assert_eq!(saved.shop_upi_id, Some("9876543210@paytm".to_string()));
         assert_eq!(saved.invoice_footer, "Goods once sold cannot be returned after 7 days.");
 
         let fetched = get_shop_profile_db(&conn).expect("Should fetch profile");
@@ -206,6 +219,7 @@ mod tests {
             shop_phone: "".to_string(),
             shop_email: None,
             shop_gstin: None,
+            shop_upi_id: None,
             invoice_footer: "".to_string(),
         };
 

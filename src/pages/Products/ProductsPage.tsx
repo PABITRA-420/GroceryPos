@@ -21,7 +21,7 @@ import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
 import { StockAdjustmentModal } from '../../components/inventory/StockAdjustmentModal';
 import { StockLedgerModal } from '../../components/inventory/StockLedgerModal';
-import { productService, GROCERY_UNITS, GST_RATES } from '../../services/productService';
+import { productService, GROCERY_UNITS, GST_RATES, COMMON_GROCERY_HSN } from '../../services/productService';
 import type { Product, CreateProductInput, UpdateProductInput } from '../../types';
 
 // Standard grocery categories commonly used in India
@@ -79,8 +79,9 @@ export const ProductsPage: React.FC = () => {
   const [formData, setFormData] = useState({
     name: '',
     barcode: '',
+    hsn_code: '',
     category: 'General',
-    unit: 'Piece',
+    unit: 'Kg',
     purchase_price: '',
     selling_price: '',
     mrp: '',
@@ -166,7 +167,8 @@ export const ProductsPage: React.FC = () => {
       if (q) {
         const matchesName = p.name.toLowerCase().includes(q);
         const matchesBarcode = p.barcode ? p.barcode.toLowerCase().includes(q) : false;
-        if (!matchesName && !matchesBarcode) return false;
+        const matchesHsn = p.hsn_code ? p.hsn_code.toLowerCase().includes(q) : false;
+        if (!matchesName && !matchesBarcode && !matchesHsn) return false;
       }
 
       // 2. Category Filter
@@ -189,8 +191,9 @@ export const ProductsPage: React.FC = () => {
     setFormData({
       name: '',
       barcode: '',
+      hsn_code: '',
       category: 'General',
-      unit: 'Piece',
+      unit: 'Kg',
       purchase_price: '',
       selling_price: '',
       mrp: '',
@@ -208,8 +211,9 @@ export const ProductsPage: React.FC = () => {
     setFormData({
       name: product.name,
       barcode: product.barcode || '',
+      hsn_code: product.hsn_code || '',
       category: product.category || 'General',
-      unit: product.unit || 'Piece',
+      unit: product.unit || 'Kg',
       purchase_price: product.purchase_price > 0 ? String(product.purchase_price) : '',
       selling_price: String(product.selling_price),
       mrp: product.mrp > 0 ? String(product.mrp) : '',
@@ -287,8 +291,8 @@ export const ProductsPage: React.FC = () => {
     const selling_price = parseFloat(formData.selling_price);
     const mrp = formData.mrp ? parseFloat(formData.mrp) : selling_price;
     const gst_rate = parseFloat(formData.gst_rate) || 0;
-    const stock = formData.stock !== '' ? parseFloat(formData.stock) : 0;
-    const minimum_stock = formData.minimum_stock !== '' ? parseFloat(formData.minimum_stock) : 0;
+    const stock = formData.stock !== '' ? Math.round(parseFloat(formData.stock) || 0) : 0;
+    const minimum_stock = formData.minimum_stock !== '' ? Math.round(parseFloat(formData.minimum_stock) || 0) : 0;
 
     try {
       if (editingProduct) {
@@ -296,6 +300,7 @@ export const ProductsPage: React.FC = () => {
           id: editingProduct.id,
           name: formData.name.trim(),
           barcode: formData.barcode.trim() || null,
+          hsn_code: formData.hsn_code.trim() || null,
           category: formData.category.trim() || 'General',
           unit: formData.unit.trim(),
           purchase_price,
@@ -315,6 +320,7 @@ export const ProductsPage: React.FC = () => {
         const createPayload: CreateProductInput = {
           name: formData.name.trim(),
           barcode: formData.barcode.trim() || null,
+          hsn_code: formData.hsn_code.trim() || null,
           category: formData.category.trim() || 'General',
           unit: formData.unit.trim(),
           purchase_price,
@@ -640,15 +646,22 @@ export const ProductsPage: React.FC = () => {
                         {p.name}
                       </td>
 
-                      {/* Barcode */}
+                      {/* Barcode & HSN */}
                       <td className="py-3 px-4 font-mono text-[11px] text-slate-600">
-                        {p.barcode ? (
-                          <span className="px-1.5 py-0.5 bg-slate-100 rounded border border-slate-200">
-                            {p.barcode}
-                          </span>
-                        ) : (
-                          <span className="text-slate-300">—</span>
-                        )}
+                        <div className="flex flex-col gap-0.5">
+                          {p.barcode ? (
+                            <span className="px-1.5 py-0.5 bg-slate-100 rounded border border-slate-200 inline-block w-fit">
+                              {p.barcode}
+                            </span>
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                          {p.hsn_code && (
+                            <span className="text-[10px] text-slate-500 font-medium">
+                              HSN: {p.hsn_code}
+                            </span>
+                          )}
+                        </div>
                       </td>
 
                       {/* Category */}
@@ -678,7 +691,7 @@ export const ProductsPage: React.FC = () => {
                         ₹{p.mrp.toFixed(2)}
                       </td>
 
-                      {/* Stock Level */}
+                      {/* Stock Level (Always Whole Number 0, 1, 2, 3...) */}
                       <td className="py-3 px-4 text-right font-mono font-bold">
                         <span
                           className={
@@ -689,7 +702,7 @@ export const ProductsPage: React.FC = () => {
                               : 'text-slate-800'
                           }
                         >
-                          {p.stock} {p.unit}
+                          {Math.round(p.stock)} {p.unit}
                         </span>
                       </td>
 
@@ -831,8 +844,8 @@ export const ProductsPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Row 2: Category & Unit */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+          {/* Row 2: Category, Unit, HSN Code */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
                 Category
@@ -867,6 +880,27 @@ export const ProductsPage: React.FC = () => {
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                HSN Code <span className="text-slate-400 font-normal">(GST Tax)</span>
+              </label>
+              <input
+                type="text"
+                list="hsn-suggestions"
+                placeholder="e.g. 1006, 1101"
+                value={formData.hsn_code}
+                onChange={(e) => setFormData({ ...formData, hsn_code: e.target.value })}
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white font-mono"
+              />
+              <datalist id="hsn-suggestions">
+                {COMMON_GROCERY_HSN.map((item) => (
+                  <option key={item.code} value={item.code}>
+                    {item.code} - {item.description}
+                  </option>
+                ))}
+              </datalist>
             </div>
           </div>
 
@@ -958,7 +992,7 @@ export const ProductsPage: React.FC = () => {
               </label>
               <input
                 type="number"
-                step="0.001"
+                step="1"
                 min="0"
                 placeholder="0"
                 value={formData.stock}
@@ -966,7 +1000,7 @@ export const ProductsPage: React.FC = () => {
                 className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white font-mono font-semibold"
               />
               <span className="text-[10px] text-slate-400 mt-0.5 block">
-                {editingProduct ? 'Update only if adjusting inventory' : 'Initial count on shelf'}
+                {editingProduct ? 'Update only if adjusting inventory' : 'Initial count on shelf (Whole number: 0, 1, 2...)'}
               </span>
             </div>
 
@@ -976,7 +1010,7 @@ export const ProductsPage: React.FC = () => {
               </label>
               <input
                 type="number"
-                step="0.001"
+                step="1"
                 min="0"
                 placeholder="5"
                 value={formData.minimum_stock}

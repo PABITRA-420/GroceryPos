@@ -17,6 +17,7 @@ pub struct Product {
     pub minimum_stock: f64,
     pub created_at: String,
     pub updated_at: String,
+    pub hsn_code: Option<String>,
 }
 
 /// Input payload for creating a new product
@@ -32,6 +33,7 @@ pub struct CreateProductInput {
     pub gst_rate: Option<f64>,
     pub stock: Option<f64>,
     pub minimum_stock: Option<f64>,
+    pub hsn_code: Option<String>,
 }
 
 /// Input payload for updating an existing product
@@ -48,6 +50,7 @@ pub struct UpdateProductInput {
     pub gst_rate: Option<f64>,
     pub stock: Option<f64>,
     pub minimum_stock: Option<f64>,
+    pub hsn_code: Option<String>,
 }
 
 /// Search and filter parameters for product queries
@@ -148,6 +151,7 @@ fn map_row_to_product(row: &rusqlite::Row) -> rusqlite::Result<Product> {
         minimum_stock: row.get(10)?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
+        hsn_code: row.get(13).ok(),
     })
 }
 
@@ -155,6 +159,7 @@ fn map_row_to_product(row: &rusqlite::Row) -> rusqlite::Result<Product> {
 pub fn create_product_db(conn: &mut Connection, input: CreateProductInput) -> Result<Product, String> {
     let clean_name = input.name.trim().to_string();
     let clean_barcode = sanitize_barcode(input.barcode);
+    let clean_hsn = sanitize_barcode(input.hsn_code);
     let clean_category = match input.category {
         Some(c) if !c.trim().is_empty() => c.trim().to_string(),
         _ => "General".to_string(),
@@ -180,8 +185,8 @@ pub fn create_product_db(conn: &mut Connection, input: CreateProductInput) -> Re
 
     conn.execute(
         "INSERT INTO products (
-            name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);",
+            name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, hsn_code
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);",
         params![
             clean_name,
             clean_barcode,
@@ -193,6 +198,7 @@ pub fn create_product_db(conn: &mut Connection, input: CreateProductInput) -> Re
             gst_rate,
             stock,
             minimum_stock,
+            clean_hsn,
         ],
     )
     .map_err(map_sqlite_error)?;
@@ -204,7 +210,7 @@ pub fn create_product_db(conn: &mut Connection, input: CreateProductInput) -> Re
 /// Fetches a single product by its primary key ID.
 pub fn get_product_db(conn: &Connection, id: i64) -> Result<Product, String> {
     conn.query_row(
-        "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at
+        "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at, hsn_code
          FROM products WHERE id = ?1;",
         params![id],
         map_row_to_product,
@@ -219,7 +225,7 @@ pub fn get_products_db(
     conn: &Connection,
     filter: Option<ProductFilterParams>,
 ) -> Result<Vec<Product>, String> {
-    let mut sql = "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at FROM products WHERE 1=1".to_string();
+    let mut sql = "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at, hsn_code FROM products WHERE 1=1".to_string();
     let mut param_values: Vec<rusqlite::types::Value> = Vec::new();
 
     if let Some(ref f) = filter {
@@ -227,7 +233,8 @@ pub fn get_products_db(
             let q = query.trim();
             if !q.is_empty() {
                 let search_param = format!("%{}%", q);
-                sql.push_str(" AND (name LIKE ? COLLATE NOCASE OR barcode LIKE ? COLLATE NOCASE)");
+                sql.push_str(" AND (name LIKE ? COLLATE NOCASE OR barcode LIKE ? COLLATE NOCASE OR hsn_code LIKE ? COLLATE NOCASE)");
+                param_values.push(search_param.clone().into());
                 param_values.push(search_param.clone().into());
                 param_values.push(search_param.into());
             }
@@ -299,6 +306,11 @@ pub fn update_product_db(conn: &mut Connection, input: UpdateProductInput) -> Re
         minimum_stock,
     )?;
 
+    let clean_hsn = match input.hsn_code {
+        Some(h) => sanitize_barcode(Some(h)),
+        None => current.hsn_code,
+    };
+
     conn.execute(
         "UPDATE products SET
             name = ?1,
@@ -311,8 +323,9 @@ pub fn update_product_db(conn: &mut Connection, input: UpdateProductInput) -> Re
             gst_rate = ?8,
             stock = ?9,
             minimum_stock = ?10,
+            hsn_code = ?11,
             updated_at = datetime('now', 'localtime')
-         WHERE id = ?11;",
+         WHERE id = ?12;",
         params![
             clean_name,
             clean_barcode,
@@ -324,6 +337,7 @@ pub fn update_product_db(conn: &mut Connection, input: UpdateProductInput) -> Re
             gst_rate,
             stock,
             minimum_stock,
+            clean_hsn,
             input.id,
         ],
     )
@@ -346,7 +360,7 @@ pub fn delete_product_db(conn: &mut Connection, id: i64) -> Result<bool, String>
     Ok(true)
 }
 
-/// Dedicated fast search by name or barcode prefix/substring.
+/// Dedicated fast search by name, barcode, or HSN code prefix/substring.
 pub fn search_products_db(conn: &Connection, query: String) -> Result<Vec<Product>, String> {
     let q = query.trim();
     if q.is_empty() {
@@ -356,16 +370,16 @@ pub fn search_products_db(conn: &Connection, query: String) -> Result<Vec<Produc
     let search_param = format!("%{}%", q);
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at
+            "SELECT id, name, barcode, category, unit, purchase_price, selling_price, mrp, gst_rate, stock, minimum_stock, created_at, updated_at, hsn_code
              FROM products
-             WHERE name LIKE ?1 COLLATE NOCASE OR barcode LIKE ?2 COLLATE NOCASE
+             WHERE name LIKE ?1 COLLATE NOCASE OR barcode LIKE ?2 COLLATE NOCASE OR hsn_code LIKE ?3 COLLATE NOCASE
              ORDER BY name COLLATE NOCASE ASC
              LIMIT 50;",
         )
         .map_err(map_sqlite_error)?;
 
     let product_iter = stmt
-        .query_map(params![search_param, search_param], map_row_to_product)
+        .query_map(params![search_param, search_param, search_param], map_row_to_product)
         .map_err(map_sqlite_error)?;
 
     let mut products = Vec::new();
@@ -384,6 +398,7 @@ mod tests {
         let conn = Connection::open_in_memory().expect("Failed to open in-memory db");
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn.execute_batch(include_str!("../migrations/001_initial_schema.sql")).unwrap();
+        conn.execute_batch(include_str!("../migrations/004_hsn_and_gstin.sql")).unwrap();
         conn
     }
 
@@ -401,6 +416,7 @@ mod tests {
             gst_rate: Some(0.0),
             stock: Some(40.0),
             minimum_stock: Some(10.0),
+            hsn_code: Some("1006".to_string()),
         };
 
         let product = create_product_db(&mut conn, input).expect("Failed to create product");
@@ -409,6 +425,7 @@ mod tests {
         assert_eq!(product.barcode, Some("8901234567890".to_string()));
         assert_eq!(product.selling_price, 110.0);
         assert_eq!(product.stock, 40.0);
+        assert_eq!(product.hsn_code, Some("1006".to_string()));
 
         let fetched = get_product_db(&conn, product.id).expect("Failed to get product");
         assert_eq!(fetched, product);
@@ -428,6 +445,7 @@ mod tests {
             gst_rate: None,
             stock: None,
             minimum_stock: None,
+            hsn_code: None,
         };
         let err = create_product_db(&mut conn, empty_name_input).unwrap_err();
         assert!(err.contains("Product name is required"));
@@ -443,6 +461,7 @@ mod tests {
             gst_rate: None,
             stock: None,
             minimum_stock: None,
+            hsn_code: None,
         };
         let err2 = create_product_db(&mut conn, negative_price_input).unwrap_err();
         assert!(err2.contains("Purchase price must be a valid positive number"));
@@ -462,6 +481,7 @@ mod tests {
             gst_rate: None,
             stock: None,
             minimum_stock: None,
+            hsn_code: None,
         };
         create_product_db(&mut conn, item1).unwrap();
 
@@ -476,6 +496,7 @@ mod tests {
             gst_rate: None,
             stock: None,
             minimum_stock: None,
+            hsn_code: None,
         };
         let err = create_product_db(&mut conn, item2).unwrap_err();
         assert!(err.contains("already exists"), "Duplicate barcode should be friendly: {}", err);
@@ -495,6 +516,7 @@ mod tests {
             gst_rate: None,
             stock: None,
             minimum_stock: None,
+            hsn_code: None,
         };
         let p1 = create_product_db(&mut conn, item1).unwrap();
 
@@ -509,6 +531,7 @@ mod tests {
             gst_rate: None,
             stock: None,
             minimum_stock: None,
+            hsn_code: None,
         };
         let p2 = create_product_db(&mut conn, item2).unwrap();
 
@@ -531,6 +554,7 @@ mod tests {
             gst_rate: Some(0.0),
             stock: Some(3.0),
             minimum_stock: Some(5.0), // Low stock
+            hsn_code: Some("2501".to_string()),
         }).unwrap();
 
         create_product_db(&mut conn, CreateProductInput {
@@ -544,6 +568,7 @@ mod tests {
             gst_rate: Some(5.0),
             stock: Some(0.0), // Out of stock
             minimum_stock: Some(10.0),
+            hsn_code: Some("1512".to_string()),
         }).unwrap();
 
         create_product_db(&mut conn, CreateProductInput {
@@ -557,6 +582,7 @@ mod tests {
             gst_rate: Some(0.0),
             stock: Some(25.0), // In stock
             minimum_stock: Some(5.0),
+            hsn_code: Some("1101".to_string()),
         }).unwrap();
 
         // Search by name substring
@@ -568,6 +594,11 @@ mod tests {
         let search_barcode = search_products_db(&conn, "7281010".to_string()).unwrap();
         assert_eq!(search_barcode.len(), 1);
         assert_eq!(search_barcode[0].name, "Fortune Oil 1L");
+
+        // Search by HSN Code
+        let search_hsn = search_products_db(&conn, "1101".to_string()).unwrap();
+        assert_eq!(search_hsn.len(), 1);
+        assert_eq!(search_hsn[0].name, "Aashirvaad Atta 5kg");
 
         // Filter: low stock only (stock <= minimum_stock AND stock > 0)
         let low_stock = get_products_db(&conn, Some(ProductFilterParams {
@@ -600,6 +631,7 @@ mod tests {
             gst_rate: Some(18.0),
             stock: Some(33.0),
             minimum_stock: Some(5.0),
+            hsn_code: None,
         }).unwrap();
 
         // Update name and price without passing stock (None)
@@ -615,6 +647,7 @@ mod tests {
             gst_rate: None,
             stock: None, // Stock not specified, must preserve 33.0
             minimum_stock: None,
+            hsn_code: Some("1902".to_string()),
         };
 
         let updated = update_product_db(&mut conn, update_input).unwrap();
@@ -622,6 +655,7 @@ mod tests {
         assert_eq!(updated.selling_price, 75.0);
         assert_eq!(updated.stock, 33.0, "Stock must be preserved when omitted");
         assert_eq!(updated.barcode, Some("99887766".to_string()));
+        assert_eq!(updated.hsn_code, Some("1902".to_string()));
     }
 
     #[test]
@@ -638,6 +672,7 @@ mod tests {
             gst_rate: Some(12.0),
             stock: Some(50.0),
             minimum_stock: Some(10.0),
+            hsn_code: None,
         }).unwrap();
 
         // 1. Delete when not referenced works
@@ -656,6 +691,7 @@ mod tests {
             gst_rate: Some(12.0),
             stock: Some(50.0),
             minimum_stock: Some(10.0),
+            hsn_code: None,
         }).unwrap();
 
         // Create a sale and a sale_item referencing prod2
@@ -666,8 +702,8 @@ mod tests {
         let sale_id = conn.last_insert_rowid();
 
         conn.execute(
-            "INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, mrp, gst_rate, tax_amount, total_price)
-             VALUES (?1, ?2, 'Maggi Noodles', 1, 14.0, 14.0, 12.0, 1.5, 14.0);",
+            "INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, mrp, gst_rate, tax_amount, total_price, hsn_code)
+             VALUES (?1, ?2, 'Maggi Noodles', 1, 14.0, 14.0, 12.0, 1.5, 14.0, NULL);",
             params![sale_id, prod2.id],
         ).unwrap();
 
@@ -691,6 +727,7 @@ mod tests {
             gst_rate: Some(0.0),
             stock: Some(20.0),
             minimum_stock: Some(5.0),
+            hsn_code: None,
         }).unwrap_err();
 
         assert!(

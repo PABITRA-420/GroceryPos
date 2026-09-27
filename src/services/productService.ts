@@ -8,17 +8,47 @@ import type {
 } from '../types';
 
 /**
- * Common grocery retail units supported across Indian grocery stores.
+ * Common grocery retail units supported across Indian grocery stores & Kirana dukans.
  */
 export const GROCERY_UNITS = [
-  'Piece',
   'Kg',
   'Gram',
   'Litre',
   'ML',
+  'Piece',
   'Packet',
+  'Pouch',
+  'Sachet',
   'Box',
   'Dozen',
+  'Bottle',
+  'Can',
+  'Tin',
+  'Jar',
+  'Bori / Bag',
+  'Quintal (Qtl)',
+] as const;
+
+/**
+ * Common Indian Grocery GST HSN code references.
+ */
+export const COMMON_GROCERY_HSN = [
+  { code: '1006', description: 'Rice / Chawal (Non-basmati & Basmati)' },
+  { code: '1101', description: 'Wheat Flour / Atta / Maida / Suji' },
+  { code: '0713', description: 'Pulses / Dal (Toor, Moong, Chana, Masoor)' },
+  { code: '1507', description: 'Edible Oils (Mustard, Sunflower, Soyabean)' },
+  { code: '0401', description: 'Milk & Dairy (Doodh, Dahi, Paneer)' },
+  { code: '0405', description: 'Butter, Dairy Spreads & Ghee' },
+  { code: '1701', description: 'Cane Sugar / Chini / Shakkar / Gur' },
+  { code: '0910', description: 'Ginger, Saffron, Turmeric & Mixed Spices' },
+  { code: '0902', description: 'Tea / Chai Patti' },
+  { code: '0901', description: 'Coffee Beans & Powder' },
+  { code: '1905', description: 'Biscuits, Bread, Rusks & Bakery' },
+  { code: '2106', description: 'Namkeen, Bhujia, Savory Snacks' },
+  { code: '3401', description: 'Bathing Soaps, Detergents & Cleaning' },
+  { code: '3306', description: 'Toothpaste & Oral Hygiene' },
+  { code: '2201', description: 'Packaged Drinking Water' },
+  { code: '2103', description: 'Sauces, Ketchup & Condiments' },
 ] as const;
 
 /**
@@ -54,7 +84,8 @@ export const productService = {
       name: input.name.trim(),
       barcode: input.barcode?.trim() || null,
       category: input.category?.trim() || 'General',
-      unit: input.unit.trim() || 'Piece',
+      unit: input.unit.trim() || 'Kg',
+      hsn_code: input.hsn_code?.trim() || null,
       purchase_price: input.purchase_price ?? 0,
       selling_price: input.selling_price,
       mrp: input.mrp ?? input.selling_price,

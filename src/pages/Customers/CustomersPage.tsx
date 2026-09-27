@@ -50,6 +50,7 @@ export const CustomersPage: React.FC = () => {
     name: '',
     phone: '',
     address: '',
+    gstin: '',
   });
   const [fieldErrors, setFieldErrors] = useState<FormErrors>({});
 
@@ -102,7 +103,8 @@ export const CustomersPage: React.FC = () => {
       const matchesName = c.name.toLowerCase().includes(q);
       const matchesPhone = c.phone ? c.phone.includes(q) : false;
       const matchesAddress = c.address ? c.address.toLowerCase().includes(q) : false;
-      return matchesName || matchesPhone || matchesAddress;
+      const matchesGstin = c.gstin ? c.gstin.toLowerCase().includes(q) : false;
+      return matchesName || matchesPhone || matchesAddress || matchesGstin;
     });
   }, [customers, searchQuery]);
 
@@ -113,6 +115,7 @@ export const CustomersPage: React.FC = () => {
       name: '',
       phone: '',
       address: '',
+      gstin: '',
     });
     setFieldErrors({});
     setFormError(null);
@@ -125,6 +128,7 @@ export const CustomersPage: React.FC = () => {
       name: customer.name,
       phone: customer.phone || '',
       address: customer.address || '',
+      gstin: customer.gstin || '',
     });
     setFieldErrors({});
     setFormError(null);
@@ -174,6 +178,7 @@ export const CustomersPage: React.FC = () => {
           name: formData.name.trim(),
           phone: formData.phone.trim() || null,
           address: formData.address.trim() || null,
+          gstin: formData.gstin.trim().toUpperCase() || null,
         };
         const updated = await customerService.updateCustomer(updatePayload);
         setCustomers((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
@@ -186,6 +191,7 @@ export const CustomersPage: React.FC = () => {
           name: formData.name.trim(),
           phone: formData.phone.trim() || null,
           address: formData.address.trim() || null,
+          gstin: formData.gstin.trim().toUpperCase() || null,
         };
         const created = await customerService.createCustomer(createPayload);
         setCustomers((prev) => [created, ...prev]);
@@ -397,7 +403,14 @@ export const CustomersPage: React.FC = () => {
                   <tr key={c.id} className="hover:bg-slate-50/80 transition-colors group">
                     {/* Customer Name */}
                     <td className="py-3 px-4 font-bold text-slate-900 text-sm">
-                      {c.name}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span>{c.name}</span>
+                        {c.gstin && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10px] font-mono font-normal border border-amber-200">
+                            GST: {c.gstin}
+                          </span>
+                        )}
+                      </div>
                     </td>
 
                     {/* Phone Number */}
@@ -535,6 +548,21 @@ export const CustomersPage: React.FC = () => {
                 {fieldErrors.phone}
               </span>
             )}
+          </div>
+
+          {/* GSTIN (for B2B customers) */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Customer GSTIN <span className="text-slate-400 font-normal">(Optional, for B2B Retail / Tax Invoicing)</span>
+            </label>
+            <input
+              type="text"
+              maxLength={15}
+              placeholder="e.g. 19ABCDE1234F1Z5"
+              value={formData.gstin}
+              onChange={(e) => setFormData({ ...formData, gstin: e.target.value.toUpperCase() })}
+              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white font-mono uppercase"
+            />
           </div>
 
           {/* Address */}

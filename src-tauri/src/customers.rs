@@ -8,6 +8,7 @@ pub struct Customer {
     pub name: String,
     pub phone: Option<String>,
     pub address: Option<String>,
+    pub gstin: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -18,6 +19,8 @@ pub struct CreateCustomerInput {
     pub name: String,
     pub phone: Option<String>,
     pub address: Option<String>,
+    #[serde(default)]
+    pub gstin: Option<String>,
 }
 
 /// Input payload for updating an existing customer
@@ -27,6 +30,8 @@ pub struct UpdateCustomerInput {
     pub name: String,
     pub phone: Option<String>,
     pub address: Option<String>,
+    #[serde(default)]
+    pub gstin: Option<String>,
 }
 
 /// Search parameters for customer queries
@@ -79,6 +84,23 @@ pub fn normalize_phone(raw_phone: Option<String>) -> Result<Option<String>, Stri
     }
 }
 
+/// Normalizes and validates Indian GSTIN (e.g. 15 characters, alphanumeric).
+pub fn normalize_gstin(raw_gstin: Option<String>) -> Result<Option<String>, String> {
+    match raw_gstin {
+        Some(g) => {
+            let trimmed = g.trim().to_uppercase();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else if trimmed.len() > 15 {
+                Err("GSTIN cannot exceed 15 characters.".to_string())
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
 /// Validates customer name and fields before SQLite operations.
 pub fn validate_customer_data(name: &str) -> Result<String, String> {
     let clean_name = name.trim();
@@ -108,8 +130,9 @@ fn map_row_to_customer(row: &rusqlite::Row) -> rusqlite::Result<Customer> {
         name: row.get(1)?,
         phone: row.get(2)?,
         address: row.get(3)?,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
+        gstin: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -128,10 +151,11 @@ pub fn create_customer_db(conn: &mut Connection, input: CreateCustomerInput) -> 
         }
         None => None,
     };
+    let clean_gstin = normalize_gstin(input.gstin)?;
 
     conn.execute(
-        "INSERT INTO customers (name, phone, address) VALUES (?1, ?2, ?3);",
-        params![clean_name, clean_phone, clean_address],
+        "INSERT INTO customers (name, phone, address, gstin) VALUES (?1, ?2, ?3, ?4);",
+        params![clean_name, clean_phone, clean_address, clean_gstin],
     )
     .map_err(map_sqlite_error)?;
 
@@ -142,7 +166,7 @@ pub fn create_customer_db(conn: &mut Connection, input: CreateCustomerInput) -> 
 /// Fetches a single customer by primary key ID.
 pub fn get_customer_db(conn: &Connection, id: i64) -> Result<Customer, String> {
     conn.query_row(
-        "SELECT id, name, phone, address, created_at, updated_at FROM customers WHERE id = ?1;",
+        "SELECT id, name, phone, address, gstin, created_at, updated_at FROM customers WHERE id = ?1;",
         params![id],
         map_row_to_customer,
     )
@@ -151,12 +175,12 @@ pub fn get_customer_db(conn: &Connection, id: i64) -> Result<Customer, String> {
     .ok_or_else(|| format!("Customer with ID {} was not found.", id))
 }
 
-/// Retrieves all customers, optionally filtering by search query (name or phone).
+/// Retrieves all customers, optionally filtering by search query (name or phone or gstin).
 pub fn get_customers_db(
     conn: &Connection,
     search: Option<CustomerSearchParams>,
 ) -> Result<Vec<Customer>, String> {
-    let mut sql = "SELECT id, name, phone, address, created_at, updated_at FROM customers WHERE 1=1".to_string();
+    let mut sql = "SELECT id, name, phone, address, gstin, created_at, updated_at FROM customers WHERE 1=1".to_string();
     let mut param_values: Vec<rusqlite::types::Value> = Vec::new();
 
     if let Some(ref s) = search {
@@ -164,7 +188,8 @@ pub fn get_customers_db(
             let trimmed_q = q.trim();
             if !trimmed_q.is_empty() {
                 let search_param = format!("%{}%", trimmed_q);
-                sql.push_str(" AND (name LIKE ?1 COLLATE NOCASE OR phone LIKE ?2 COLLATE NOCASE)");
+                sql.push_str(" AND (name LIKE ?1 COLLATE NOCASE OR phone LIKE ?2 COLLATE NOCASE OR gstin LIKE ?3 COLLATE NOCASE)");
+                param_values.push(search_param.clone().into());
                 param_values.push(search_param.clone().into());
                 param_values.push(search_param.into());
             }
@@ -209,15 +234,17 @@ pub fn update_customer_db(conn: &mut Connection, input: UpdateCustomerInput) -> 
         }
         None => None,
     };
+    let clean_gstin = normalize_gstin(input.gstin)?;
 
     conn.execute(
         "UPDATE customers SET
             name = ?1,
             phone = ?2,
             address = ?3,
+            gstin = ?4,
             updated_at = datetime('now', 'localtime')
-         WHERE id = ?4;",
-        params![clean_name, clean_phone, clean_address, input.id],
+         WHERE id = ?5;",
+        params![clean_name, clean_phone, clean_address, clean_gstin, input.id],
     )
     .map_err(map_sqlite_error)?;
 
@@ -260,16 +287,16 @@ pub fn search_customers_db(conn: &Connection, query: String) -> Result<Vec<Custo
     let search_param = format!("%{}%", q);
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, phone, address, created_at, updated_at
+            "SELECT id, name, phone, address, gstin, created_at, updated_at
              FROM customers
-             WHERE name LIKE ?1 COLLATE NOCASE OR phone LIKE ?2 COLLATE NOCASE
+             WHERE name LIKE ?1 COLLATE NOCASE OR phone LIKE ?2 COLLATE NOCASE OR gstin LIKE ?3 COLLATE NOCASE
              ORDER BY name COLLATE NOCASE ASC
              LIMIT 50;",
         )
         .map_err(map_sqlite_error)?;
 
     let customer_iter = stmt
-        .query_map(params![search_param, search_param], map_row_to_customer)
+        .query_map(params![search_param, search_param, search_param], map_row_to_customer)
         .map_err(map_sqlite_error)?;
 
     let mut customers = Vec::new();
@@ -288,6 +315,9 @@ mod tests {
         let conn = Connection::open_in_memory().expect("Failed to open in-memory db");
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn.execute_batch(include_str!("../migrations/001_initial_schema.sql")).unwrap();
+        conn.execute_batch(include_str!("../migrations/002_sales_indexes.sql")).unwrap();
+        conn.execute_batch(include_str!("../migrations/003_returns_and_stock_ledger.sql")).unwrap();
+        conn.execute_batch(include_str!("../migrations/004_hsn_and_gstin.sql")).unwrap();
         conn
     }
 
@@ -313,12 +343,21 @@ mod tests {
     }
 
     #[test]
+    fn test_gstin_normalization() {
+        assert_eq!(normalize_gstin(Some("19abcde1234f1z5".to_string())).unwrap(), Some("19ABCDE1234F1Z5".to_string()));
+        assert_eq!(normalize_gstin(Some("   ".to_string())).unwrap(), None);
+        assert_eq!(normalize_gstin(None).unwrap(), None);
+        assert!(normalize_gstin(Some("19ABCDE1234F1Z50000".to_string())).is_err());
+    }
+
+    #[test]
     fn test_create_and_get_customer() {
         let mut conn = setup_test_db();
         let input = CreateCustomerInput {
             name: "Rahul Das".to_string(),
             phone: Some("98765 43210".to_string()),
             address: Some("Siliguri, College Para".to_string()),
+            gstin: Some("19ABCDE1234F1Z5".to_string()),
         };
 
         let customer = create_customer_db(&mut conn, input).expect("Failed to create customer");
@@ -326,6 +365,7 @@ mod tests {
         assert_eq!(customer.name, "Rahul Das");
         assert_eq!(customer.phone, Some("9876543210".to_string()), "Phone must be normalized without spaces");
         assert_eq!(customer.address, Some("Siliguri, College Para".to_string()));
+        assert_eq!(customer.gstin, Some("19ABCDE1234F1Z5".to_string()));
 
         let fetched = get_customer_db(&conn, customer.id).expect("Failed to get customer");
         assert_eq!(fetched, customer);
@@ -338,12 +378,14 @@ mod tests {
             name: "Walk-in Customer 1".to_string(),
             phone: None,
             address: None,
+            gstin: None,
         }).expect("Customer without phone must succeed");
 
         let c2 = create_customer_db(&mut conn, CreateCustomerInput {
             name: "Walk-in Customer 2".to_string(),
             phone: Some("  ".to_string()),
             address: None,
+            gstin: None,
         }).expect("Customer with whitespace phone must succeed");
 
         assert_eq!(c1.phone, None);
@@ -358,6 +400,7 @@ mod tests {
             name: "   ".to_string(),
             phone: Some("9876543210".to_string()),
             address: None,
+            gstin: None,
         }).unwrap_err();
 
         assert!(err.contains("name is required"));
@@ -370,30 +413,34 @@ mod tests {
             name: "Customer One".to_string(),
             phone: Some("9876543210".to_string()),
             address: None,
+            gstin: None,
         }).unwrap();
 
         let err = create_customer_db(&mut conn, CreateCustomerInput {
             name: "Customer Two".to_string(),
             phone: Some("98765 43210".to_string()), // same phone with space
             address: None,
+            gstin: None,
         }).unwrap_err();
 
         assert!(err.contains("already exists"), "Error message must be user-friendly: {}", err);
     }
 
     #[test]
-    fn test_search_by_name_and_phone() {
+    fn test_search_by_name_and_phone_and_gstin() {
         let mut conn = setup_test_db();
         create_customer_db(&mut conn, CreateCustomerInput {
             name: "Amit Kumar".to_string(),
             phone: Some("9123456780".to_string()),
             address: Some("Jalpaiguri".to_string()),
+            gstin: Some("19AAAAA0000A1Z5".to_string()),
         }).unwrap();
 
         create_customer_db(&mut conn, CreateCustomerInput {
             name: "Rahul Das".to_string(),
             phone: Some("9876543210".to_string()),
             address: Some("Siliguri".to_string()),
+            gstin: None,
         }).unwrap();
 
         // Search by name substring
@@ -405,6 +452,11 @@ mod tests {
         let res_phone = search_customers_db(&conn, "234567".to_string()).unwrap();
         assert_eq!(res_phone.len(), 1);
         assert_eq!(res_phone[0].name, "Amit Kumar");
+
+        // Search by GSTIN substring
+        let res_gstin = search_customers_db(&conn, "AAAAA".to_string()).unwrap();
+        assert_eq!(res_gstin.len(), 1);
+        assert_eq!(res_gstin[0].name, "Amit Kumar");
     }
 
     #[test]
@@ -414,6 +466,7 @@ mod tests {
             name: "Old Name".to_string(),
             phone: Some("9876543210".to_string()),
             address: Some("Old Address".to_string()),
+            gstin: None,
         }).unwrap();
 
         let updated = update_customer_db(&mut conn, UpdateCustomerInput {
@@ -421,11 +474,13 @@ mod tests {
             name: "New Name".to_string(),
             phone: Some("9123456789".to_string()),
             address: Some("New Address".to_string()),
+            gstin: Some("19ABCDE1234F1Z5".to_string()),
         }).unwrap();
 
         assert_eq!(updated.name, "New Name");
         assert_eq!(updated.phone, Some("9123456789".to_string()));
         assert_eq!(updated.address, Some("New Address".to_string()));
+        assert_eq!(updated.gstin, Some("19ABCDE1234F1Z5".to_string()));
     }
 
     #[test]
@@ -435,6 +490,7 @@ mod tests {
             name: "Buyer With Sales".to_string(),
             phone: Some("9988776655".to_string()),
             address: None,
+            gstin: None,
         }).unwrap();
 
         // 1. Link a sale to this customer
