@@ -146,7 +146,7 @@ export function generateEscPosReceipt(
     buffer += formatTwoColumns('Tax / GST Included:', `₹${sale.tax_amount.toFixed(2)}`, colWidth) + '\n';
   }
 
-  const rawNet = sale.subtotal - sale.discount_amount + sale.tax_amount;
+  const rawNet = sale.subtotal - sale.discount_amount;
   const roundOff = Math.round((sale.total_amount - rawNet) * 100) / 100;
   if (Math.abs(roundOff) > 0.001) {
     const roStr = roundOff > 0 ? `+₹${roundOff.toFixed(2)}` : `-₹${Math.abs(roundOff).toFixed(2)}`;

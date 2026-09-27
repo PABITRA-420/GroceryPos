@@ -37,6 +37,7 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
 }) => {
   const [printFormat, setPrintFormat] = useState<'thermal-80' | 'thermal-58' | 'standard'>('thermal-80');
   const [upiQrDataUrl, setUpiQrDataUrl] = useState<string | null>(null);
+  const [whatsappSent, setWhatsappSent] = useState(false);
   const { sale, items } = saleResult;
 
   // Deterministically parse the stored historical sale created_at timestamp.
@@ -64,8 +65,8 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
     }
   }, [shopProfile.shop_upi_id, shopProfile.shop_name, sale.total_amount, sale.invoice_number]);
 
-  // Financial calculations & round-off
-  const rawNetTotal = sale.subtotal - sale.discount_amount + sale.tax_amount;
+  // Financial calculations & round-off (Inclusive GST)
+  const rawNetTotal = sale.subtotal - sale.discount_amount;
   const roundOff = Math.round((sale.total_amount - rawNetTotal) * 100) / 100;
   const amountInWords = numberToWordsIndian(sale.total_amount);
 
@@ -76,7 +77,7 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
       if (item.gst_rate > 0) {
         const rate = item.gst_rate;
         const current = slabMap.get(rate) || { taxableAmount: 0, taxAmount: 0 };
-        current.taxableAmount += item.quantity * item.unit_price;
+        current.taxableAmount += item.total_price - item.tax_amount;
         current.taxAmount += item.tax_amount;
         slabMap.set(rate, current);
       }
@@ -223,11 +224,13 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
             onClick={() => {
               const text = generateWhatsAppReceiptText(saleResult, shopProfile);
               openWhatsAppShare(sale.customer_phone, text);
+              setWhatsappSent(true);
+              setTimeout(() => setWhatsappSent(false), 3000);
             }}
             className="border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold"
-            title="Send digital receipt directly to customer via WhatsApp"
+            title="Open dedicated WhatsApp tab to send receipt"
           >
-            WhatsApp Bill
+            {whatsappSent ? 'Opening WhatsApp...' : 'WhatsApp Bill'}
           </Button>
 
           {onInitiateReturn && (
@@ -363,10 +366,10 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
                     <th className="py-2 px-2 text-center">HSN</th>
                     <th className="py-2 px-2 text-center">Qty</th>
                     <th className="py-2 px-2 text-center">Unit</th>
-                    <th className="py-2 px-2 text-right">Selling Price</th>
+                    <th className="py-2 px-2 text-right">Selling Price (Incl. GST)</th>
                     <th className="py-2 px-2 text-right">MRP</th>
-                    <th className="py-2 px-2 text-center">GST</th>
-                    <th className="py-2 px-2 text-right">Tax</th>
+                    <th className="py-2 px-2 text-center">GST Rate</th>
+                    <th className="py-2 px-2 text-right">Tax (GST)</th>
                     <th className="py-2 px-3 text-right">Total</th>
                   </tr>
                 </thead>
@@ -439,7 +442,7 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
                           {item.expiry_date && <span>Exp: {item.expiry_date} · </span>}
                           {item.hsn_code && <span>HSN: {item.hsn_code} · </span>}
                           MRP: ₹{item.mrp.toFixed(2)}
-                          {item.gst_rate > 0 && ` · GST ${item.gst_rate}% (₹${item.tax_amount.toFixed(2)})`}
+                          {item.gst_rate > 0 && ` · GST ${item.gst_rate}% (Incl. ₹${item.tax_amount.toFixed(2)})`}
                         </div>
                       </td>
                       <td className="py-1.5 text-center whitespace-nowrap font-bold">
@@ -475,7 +478,7 @@ export const InvoiceReceipt: React.FC<InvoiceReceiptProps> = ({
             {sale.tax_amount > 0 && (
               <>
                 <div className="flex justify-between text-slate-600">
-                  <span>Total GST:</span>
+                  <span>Total GST (Included):</span>
                   <span className="font-medium text-slate-900">₹{sale.tax_amount.toFixed(2)}</span>
                 </div>
                 {taxSlabs.length > 0 ? (

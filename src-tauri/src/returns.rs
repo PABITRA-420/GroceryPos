@@ -335,14 +335,9 @@ pub fn create_return_db(
                 ));
             }
 
-            // Refund calculation respecting historical prices & bill discount
+            // Refund calculation respecting historical prices & bill discount (Inclusive GST)
             let effective_unit_price = unit_price * (1.0 - discount_ratio);
-            let tax_per_unit = if gst_rate > 0.0 {
-                effective_unit_price * (gst_rate / 100.0)
-            } else {
-                0.0
-            };
-            let line_unit_paid = effective_unit_price + tax_per_unit;
+            let line_unit_paid = effective_unit_price;
             let line_refund = round_currency(item_in.return_quantity * line_unit_paid);
 
             total_refund += line_refund;

@@ -46,21 +46,55 @@ export function generateWhatsAppReceiptText(
   return lines.join('\n');
 }
 
+let activeWhatsAppTab: Window | null = null;
+
 /**
- * Opens WhatsApp Web or WhatsApp Desktop app via sanitized wa.me link.
+ * Dispatches a WhatsApp bill without opening dozens of browser tabs or triggering "Leave site?" dialogs.
+ * 
+ * Key Features:
+ * 1. Reuses a single named browser tab ('pos_whatsapp_session') instead of opening a new tab every time.
+ * 2. Copies formatted bill message to clipboard automatically.
+ * 3. Supports direct desktop protocol via hidden iframe without page navigation.
  */
 export function openWhatsAppShare(
   phone: string | null | undefined,
-  message: string
+  message: string,
+  mode: 'web_reused_tab' | 'desktop_app' = 'web_reused_tab'
 ): void {
   let cleanPhone = (phone || '').replace(/[^0-9]/g, '');
   if (cleanPhone.length === 10) {
     cleanPhone = '91' + cleanPhone;
   }
   const encodedText = encodeURIComponent(message);
-  const url = cleanPhone
-    ? `https://wa.me/${cleanPhone}?text=${encodedText}`
-    : `https://wa.me/?text=${encodedText}`;
 
-  window.open(url, '_blank');
+  // 1. Native Desktop App via hidden iframe (zero page navigation, zero "Leave site" warning)
+  if (mode === 'desktop_app') {
+    const nativeAppUrl = cleanPhone
+      ? `whatsapp://send?phone=${cleanPhone}&text=${encodedText}`
+      : `whatsapp://send?text=${encodedText}`;
+
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = nativeAppUrl;
+    document.body.appendChild(iframe);
+    setTimeout(() => {
+      try {
+        document.body.removeChild(iframe);
+      } catch {}
+    }, 2000);
+    return;
+  }
+
+  // 3. Web mode with strict single-tab reuse:
+  const webDirectUrl = cleanPhone
+    ? `https://web.whatsapp.com/send?phone=${cleanPhone}&text=${encodedText}`
+    : `https://web.whatsapp.com/send?text=${encodedText}`;
+
+  // If the WhatsApp tab is already open, navigate the existing tab & focus it (NO new tab)
+  if (activeWhatsAppTab && !activeWhatsAppTab.closed) {
+    activeWhatsAppTab.location.href = webDirectUrl;
+    activeWhatsAppTab.focus();
+  } else {
+    activeWhatsAppTab = window.open(webDirectUrl, 'pos_whatsapp_session');
+  }
 }

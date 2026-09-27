@@ -44,6 +44,8 @@ pub struct CreateSaleInput {
     pub split_upi: Option<f64>,
     #[serde(default)]
     pub split_card: Option<f64>,
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 /// Itemized sale item record persisted in SQLite `sale_items`
@@ -376,16 +378,16 @@ pub fn complete_sale_db(
                 }
             }
 
-            // Calculations
-            let line_subtotal = round_currency(item.quantity * item.unit_price);
+            // Calculations (GST is Inclusive in item unit price)
+            let line_total = round_currency(item.quantity * item.unit_price);
             let tax_amount = if item.gst_rate > 0.0 {
-                round_currency(line_subtotal * (item.gst_rate / 100.0))
+                let base = line_total / (1.0 + (item.gst_rate / 100.0));
+                round_currency(line_total - base)
             } else {
                 0.0
             };
-            let line_total = round_currency(line_subtotal + tax_amount);
 
-            subtotal += line_subtotal;
+            subtotal += line_total;
             total_tax += tax_amount;
 
             let hsn_code = match &item.hsn_code {
@@ -469,7 +471,7 @@ pub fn complete_sale_db(
             ));
         }
 
-        let mut total_amount = round_currency(subtotal - input.discount_amount + total_tax);
+        let mut total_amount = round_currency(subtotal - input.discount_amount);
         if let Some(ro) = input.round_off {
             if ro.abs() <= 1.0 {
                 total_amount = round_currency(total_amount + ro);
@@ -501,12 +503,19 @@ pub fn complete_sale_db(
             };
         }
 
+        let created_at_sql: String = match &input.created_at {
+            Some(ts) if !ts.trim().is_empty() => ts.trim().to_string(),
+            _ => tx
+                .query_row("SELECT datetime('now', 'localtime');", [], |r| r.get(0))
+                .unwrap_or_else(|_| "1970-01-01 00:00:00".to_string()),
+        };
+
         tx.execute(
             "INSERT INTO sales (
                 invoice_number, customer_id, customer_name, customer_phone,
                 subtotal, discount_amount, tax_amount, total_amount,
                 payment_mode, payment_status, notes, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now', 'localtime'));",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);",
             params![
                 invoice_number,
                 input.customer_id,
@@ -519,6 +528,7 @@ pub fn complete_sale_db(
                 payment_mode,
                 payment_status,
                 final_notes,
+                created_at_sql,
             ],
         )
         .map_err(|e| format!("Failed to insert sale record: {}", e))?;
@@ -1971,8 +1981,9 @@ mod tests {
         assert_eq!(result.sale.customer_phone, Some("9876543210".to_string()));
         assert_eq!(result.sale.subtotal, 200.0);
         assert_eq!(result.sale.discount_amount, 10.0);
-        assert_eq!(result.sale.tax_amount, 18.0);
-        assert_eq!(result.sale.total_amount, 208.0); // 200 - 10 + 18
+        // Shampoo (₹100 incl. 18% GST): tax = 100 - (100 / 1.18) = 15.25
+        assert_eq!(result.sale.tax_amount, 15.25);
+        assert_eq!(result.sale.total_amount, 190.0); // 200 - 10 (Inclusive GST)
         assert_eq!(result.sale.payment_mode, "UPI");
 
         // Verify query by invoice
@@ -2845,19 +2856,19 @@ mod tests {
 
         assert_eq!(report.summary.total_invoices, 1);
         assert_eq!(report.summary.total_items_sold, 3.0);
-        // Revenue: subtotal 270 - 10 discount + 9.5 tax = 269.5
-        assert_eq!(report.summary.total_sales_revenue, 269.5);
+        // Revenue: subtotal 270 - 10 discount = 260.0 (Inclusive GST)
+        assert_eq!(report.summary.total_sales_revenue, 260.0);
         // Cost: 2 * 70 + 1 * 60 = 200.0
         assert_eq!(report.summary.total_purchase_cost, 200.0);
-        // Profit: 269.5 - 200 = 69.5
-        assert_eq!(report.summary.gross_profit, 69.5);
-        assert_eq!(report.summary.payment_upi, 269.5);
+        // Profit: 260.0 - 200 = 60.0
+        assert_eq!(report.summary.gross_profit, 60.0);
+        assert_eq!(report.summary.payment_upi, 260.0);
         assert_eq!(report.summary.payment_cash, 0.0);
 
         // Check customer spend
         assert_eq!(report.customers.len(), 1);
         assert_eq!(report.customers[0].name, "Ramesh Gupta");
-        assert_eq!(report.customers[0].total_spent_on_buying, 269.5);
+        assert_eq!(report.customers[0].total_spent_on_buying, 260.0);
         assert_eq!(report.customers[0].total_purchase_cost_to_store, 200.0);
 
         // Check top products

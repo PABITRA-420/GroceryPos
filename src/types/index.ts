@@ -252,6 +252,7 @@ export interface CreateSaleInput {
   split_cash?: number | null;
   split_upi?: number | null;
   split_card?: number | null;
+  created_at?: string | null;
 }
 
 /**

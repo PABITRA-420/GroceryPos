@@ -20,6 +20,7 @@ import {
   PauseCircle,
   Split,
   AlertTriangle,
+  Wifi,
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Modal } from '../../components/ui/Modal';
@@ -30,6 +31,7 @@ import { ParkedBillsModal } from '../../components/billing/ParkedBillsModal';
 import { parkedBillService, type ParkedBill } from '../../services/parkedBillService';
 import { productService } from '../../services/productService';
 import { customerService } from '../../services/customerService';
+import { timeSyncService } from '../../services/timeSyncService';
 import {
   billingService,
   formatCurrency,
@@ -126,6 +128,11 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
   const [recentSales, setRecentSales] = useState<Sale[]>([]);
   const [isRecentSalesOpen, setIsRecentSalesOpen] = useState(false);
 
+  // Internet Time Sync state
+  const [currentTime, setCurrentTime] = useState<Date>(() => timeSyncService.getNow());
+  const [isTimeSynced, setIsTimeSynced] = useState<boolean>(() => timeSyncService.getStatus().isSynced);
+  const [isOnline, setIsOnline] = useState<boolean>(() => timeSyncService.getStatus().isOnline);
+
   // Status & error handling
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -140,6 +147,16 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
   // ----------------------------------------------------
   useEffect(() => {
     loadInitialData();
+  }, []);
+
+  // Subscribe to live internet-synced time ticks
+  useEffect(() => {
+    const unsubscribe = timeSyncService.subscribe((now, synced, online) => {
+      setCurrentTime(now);
+      setIsTimeSynced(synced);
+      setIsOnline(online);
+    });
+    return unsubscribe;
   }, []);
 
   const loadInitialData = async () => {
@@ -215,14 +232,15 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
   // Section 29: Unsaved bill protection on window navigation or reload
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (cart.length > 0) {
+      // Only protect if items exist in active cart and the sale is NOT yet completed
+      if (cart.length > 0 && !completedSale) {
         e.preventDefault();
         e.returnValue = '';
       }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [cart.length]);
+  }, [cart.length, completedSale]);
 
   // ----------------------------------------------------
   // Product Search & Barcode Scan Handling
@@ -580,19 +598,19 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
   };
 
   // ----------------------------------------------------
-  // Deterministic Cart Calculations
+  // Deterministic Cart Calculations (Inclusive GST)
   // ----------------------------------------------------
   const calculations = useMemo(() => {
     let subtotal = 0;
     let totalTax = 0;
 
     cart.forEach((item) => {
-      const lineSubtotal = Math.round(item.quantity * item.unit_price * 100) / 100;
+      const lineTotal = Math.round(item.quantity * item.unit_price * 100) / 100;
       const lineTax =
         item.gst_rate > 0
-          ? Math.round(lineSubtotal * (item.gst_rate / 100) * 100) / 100
+          ? Math.round((lineTotal - lineTotal / (1 + item.gst_rate / 100)) * 100) / 100
           : 0;
-      subtotal += lineSubtotal;
+      subtotal += lineTotal;
       totalTax += lineTax;
     });
 
@@ -600,7 +618,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
     totalTax = Math.round(totalTax * 100) / 100;
 
     const validatedDiscount = Math.min(Math.max(0, discountAmount || 0), subtotal);
-    const rawNetTotal = Math.round((subtotal - validatedDiscount + totalTax) * 100) / 100;
+    const rawNetTotal = Math.round((subtotal - validatedDiscount) * 100) / 100;
     const roundedGrandTotal = Math.round(rawNetTotal);
     const roundOff = Math.round((roundedGrandTotal - rawNetTotal) * 100) / 100;
     const grandTotal = roundedGrandTotal;
@@ -784,6 +802,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
         split_cash: paymentMode === 'SPLIT' ? splitTotals.cash : null,
         split_upi: paymentMode === 'SPLIT' ? splitTotals.upi : null,
         split_card: paymentMode === 'SPLIT' ? splitTotals.card : null,
+        created_at: timeSyncService.getNowLocalSqlString(),
       };
 
       const result = await billingService.completeSale(saleInput);
@@ -870,6 +889,48 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
           <span className="text-xs font-mono bg-slate-100 text-slate-600 px-2 py-0.5 rounded border border-slate-200">
             F2: Search / Scan
           </span>
+          <span className="text-slate-300">|</span>
+          <div
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-mono bg-slate-50 cursor-pointer hover:bg-slate-100 transition-colors"
+            onClick={() => timeSyncService.syncWithInternetTime()}
+            title={
+              isTimeSynced
+                ? 'Time synchronized with internet clock. Click to re-sync.'
+                : isOnline
+                ? 'Connected to internet. Syncing clock...'
+                : 'Offline: Using system clock.'
+            }
+          >
+            <Wifi
+              className={`w-3.5 h-3.5 ${
+                isTimeSynced ? 'text-emerald-600' : isOnline ? 'text-amber-500' : 'text-slate-400'
+              }`}
+            />
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isTimeSynced ? 'bg-emerald-500' : isOnline ? 'bg-amber-400 animate-pulse' : 'bg-slate-400'
+              }`}
+            />
+            <span className="font-bold text-slate-800">
+              {currentTime.toLocaleTimeString('en-IN', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true,
+              })}
+            </span>
+            <span
+              className={`text-[9px] uppercase font-bold px-1 py-0.2 rounded ${
+                isTimeSynced
+                  ? 'bg-emerald-100 text-emerald-800'
+                  : isOnline
+                  ? 'bg-amber-100 text-amber-800'
+                  : 'bg-slate-200 text-slate-700'
+              }`}
+            >
+              {isTimeSynced ? 'Net Synced' : isOnline ? 'Online' : 'Offline'}
+            </span>
+          </div>
         </div>
 
         <div className="flex items-center gap-2.5 flex-wrap">
@@ -1312,7 +1373,7 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
                         )}
                         <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
                           <span>₹{item.unit_price.toFixed(2)} / {item.unit}</span>
-                          {item.gst_rate > 0 && <span>· GST {item.gst_rate}%</span>}
+                          {item.gst_rate > 0 && <span>· GST {item.gst_rate}% (Incl.)</span>}
                           {item.hsn_code && <span>· HSN {item.hsn_code}</span>}
                           {['Kg', 'Gram', 'Litre', 'ML', 'Quintal (Qtl)'].includes(item.unit) && (
                             <button
@@ -1418,7 +1479,9 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onCartChange }) => {
 
               {calculations.totalTax > 0 && (
                 <div className="flex justify-between text-slate-600">
-                  <span>Tax / GST:</span>
+                  <span className="flex items-center gap-1">
+                    GST Tax (Included):
+                  </span>
                   <span className="font-semibold text-slate-800">
                     ₹{calculations.totalTax.toFixed(2)}
                   </span>

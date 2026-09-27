@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriEnvironment } from './tauriService';
+import { timeSyncService } from './timeSyncService';
 import type {
   CreateSaleInput,
   SaleResult,
@@ -74,7 +75,26 @@ export function formatSaleDateTime(createdAt: string): { date: string; time: str
 
   const trimmed = createdAt.trim();
 
-  // Try standard regex match for "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS"
+  // If the timestamp has UTC indicator 'Z' or timezone offset, parse via Date to render local time
+  const hasTimezone = trimmed.includes('Z') || /[+-]\d{2}(?::?\d{2})?$/.test(trimmed);
+  if (hasTimezone) {
+    const d = new Date(trimmed);
+    if (!isNaN(d.getTime())) {
+      const day = String(d.getDate()).padStart(2, '0');
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const year = d.getFullYear();
+      let hours = d.getHours();
+      const minutes = String(d.getMinutes()).padStart(2, '0');
+      const ampm = hours >= 12 ? 'PM' : 'AM';
+      hours = hours % 12 || 12;
+      return {
+        date: `${day}/${month}/${year}`,
+        time: `${String(hours).padStart(2, '0')}:${minutes} ${ampm}`,
+      };
+    }
+  }
+
+  // Try standard regex match for "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS" (already local)
   const match = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
   if (match) {
     const [, year, month, day, hourStr, minStr] = match;
@@ -152,13 +172,23 @@ export const billingService = {
       return await invoke<SaleResult>('complete_sale', { input });
     }
 
-    // In-memory simulation for browser preview mode
-    const subtotal = input.items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
-    const tax_amount = input.items.reduce(
-      (sum, item) => sum + (item.quantity * item.unit_price * (item.gst_rate / 100)),
+    // In-memory simulation for browser preview mode (Inclusive GST)
+    const subtotal = input.items.reduce(
+      (sum, item) => sum + Math.round(item.quantity * item.unit_price * 100) / 100,
       0
     );
-    const total_amount = Math.max(0, subtotal - input.discount_amount + tax_amount);
+    const tax_amount = input.items.reduce((sum, item) => {
+      if (item.gst_rate > 0) {
+        const lineTotal = Math.round(item.quantity * item.unit_price * 100) / 100;
+        const base = lineTotal / (1 + item.gst_rate / 100);
+        return sum + (lineTotal - base);
+      }
+      return sum;
+    }, 0);
+    const roundedTaxAmount = Math.round(tax_amount * 100) / 100;
+    const rawNet = subtotal - input.discount_amount;
+    const roundOff = input.round_off ?? (Math.round(rawNet) - rawNet);
+    const total_amount = Math.max(0, Math.round((rawNet + roundOff) * 100) / 100);
     const invoiceNumber = `INV-${String(previewSales.length + 1).padStart(6, '0')}`;
     const saleId = Date.now();
 
@@ -168,30 +198,36 @@ export const billingService = {
       customer_id: input.customer_id || null,
       customer_name: input.customer_name || 'Walk-in Customer',
       customer_phone: input.customer_phone || null,
-      subtotal,
+      subtotal: Math.round(subtotal * 100) / 100,
       discount_amount: input.discount_amount,
-      tax_amount,
+      tax_amount: roundedTaxAmount,
       total_amount,
       payment_mode: input.payment_mode,
       payment_status: 'PAID',
       notes: input.notes || null,
-      created_at: new Date().toISOString(),
+      created_at: input.created_at || timeSyncService.getNowLocalSqlString(),
     };
 
-    const items = input.items.map((item, idx) => ({
-      id: saleId + idx + 1,
-      sale_id: saleId,
-      product_id: item.product_id || null,
-      product_name: item.product_name,
-      barcode: item.barcode || null,
-      unit: item.unit,
-      quantity: item.quantity,
-      unit_price: item.unit_price,
-      mrp: item.mrp,
-      gst_rate: item.gst_rate,
-      tax_amount: (item.quantity * item.unit_price * item.gst_rate) / 100,
-      total_price: item.quantity * item.unit_price + (item.quantity * item.unit_price * item.gst_rate) / 100,
-    }));
+    const items = input.items.map((item, idx) => {
+      const lineTotal = Math.round(item.quantity * item.unit_price * 100) / 100;
+      const itemTax = item.gst_rate > 0
+        ? Math.round((lineTotal - lineTotal / (1 + item.gst_rate / 100)) * 100) / 100
+        : 0;
+      return {
+        id: saleId + idx + 1,
+        sale_id: saleId,
+        product_id: item.product_id || null,
+        product_name: item.product_name,
+        barcode: item.barcode || null,
+        unit: item.unit,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        mrp: item.mrp,
+        gst_rate: item.gst_rate,
+        tax_amount: itemTax,
+        total_price: lineTotal,
+      };
+    });
 
     const result: SaleResult = { sale, items };
     previewSales.unshift(result);
