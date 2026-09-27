@@ -352,15 +352,12 @@ fn export_database_backup(
     state: State<'_, DbState>,
     destination_path: Option<String>,
 ) -> Result<String, String> {
-    let app_data_dir = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+    let base_data_dir = db::get_data_dir(&app_handle)?;
 
     state.with_conn(|conn| {
         let backup_dir = match destination_path {
             Some(ref p) => std::path::PathBuf::from(p),
-            None => app_data_dir.join("backups"),
+            None => base_data_dir.join("backups"),
         };
 
         if !backup_dir.exists() {
@@ -451,6 +448,33 @@ fn save_file_dialog(default_name: String, extension: String) -> Result<Option<St
     }
 }
 
+/// Native command to reveal the application data directory in Windows File Explorer
+#[tauri::command]
+fn open_data_folder(app_handle: AppHandle) -> Result<String, String> {
+    let data_dir = db::get_data_dir(&app_handle)?;
+    if !data_dir.exists() {
+        let _ = std::fs::create_dir_all(&data_dir);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&data_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder in explorer: {}", e))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        std::process::Command::new(opener)
+            .arg(&data_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {}", e))?;
+    }
+
+    Ok(data_dir.to_string_lossy().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -511,7 +535,8 @@ pub fn run() {
             export_database_backup,
             restore_database_backup,
             open_file_dialog,
-            save_file_dialog
+            save_file_dialog,
+            open_data_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

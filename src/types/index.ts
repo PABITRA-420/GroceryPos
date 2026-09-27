@@ -37,6 +37,7 @@ export interface ApiResponse<T> {
 export interface DatabaseStatus {
   connected: boolean;
   file_path: string;
+  is_portable?: boolean;
   migrations_applied: number;
   total_tables: number;
   wal_enabled: boolean;
